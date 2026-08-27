@@ -64,11 +64,14 @@ def _walk_dir(
     is_protected,
     skip_names: set[str] | None = None,
     max_depth: int | None = None,
+    find_names: set[str] | None = None,
 ) -> Iterator[tuple[Path, bool]]:
     """安全遍历目录树，产出 (路径, is_dir)。
 
     - 不跟随符号链接/联接（junction）；
     - 跳过受保护目录、以及 skip_names 中的目录名；
+    - ``find_names``：这些目录名本应被 skip 跳过，但需作为目标被**发现**；
+      命中的目录只产出、不再下探，避免放大遍历进巨大目录；
     - max_depth 限制深度（根为 0）。
     """
     skip = skip_names or DEFAULT_SKIP_DIRNAMES
@@ -93,9 +96,12 @@ def _walk_dir(
                     if is_dir:
                         if is_link:
                             continue
-                        if entry.name.lower() in skip:
+                        low = entry.name.lower()
+                        if low in skip and not (find_names and low in find_names):
                             continue
                         yield child, True
+                        if find_names and low in find_names:
+                            continue  # 命中的目标目录不再下探
                         stack.append((child, depth + 1))
                     else:
                         if is_link:
@@ -286,7 +292,7 @@ def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
         if is_protected(base):
             continue
         # 只遍历一层找到候选目录名；找到后不下降（它们本身就是待删目标）
-        for child, is_dir in _walk_dir(base, is_protected, max_depth=12):
+        for child, is_dir in _walk_dir(base, is_protected, max_depth=12, find_names=names):
             if not is_dir:
                 continue
             if child.name.lower() in names:
@@ -330,7 +336,8 @@ def _scan_files_by_rule(spec: dict[str, Any], category_key: str, is_protected) -
             st = child.stat()
         except OSError:
             continue
-        if st.st_size < min_size_bytes and (now - st.st_mtime) < older_than_secs:
+        # 只清理「既达到最小体积、又足够老旧」的文件：任一条件不满足即跳过
+        if st.st_size < min_size_bytes or (now - st.st_mtime) < older_than_secs:
             continue
         targets.append(
             Target(

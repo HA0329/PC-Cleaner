@@ -27,15 +27,18 @@ from typing import Any
 DEFAULT_PROTECTED_PATTERNS: list[str] = [
     r"$recycle.bin",
     r"system volume information",
-    r"windows\winsxs",
     r"windows\system32",
+    r"windows\system",
     r"windows\syswow64",
     r"windows\systemapps",
+    r"windows\winsxs",
     r"windows\temp",
-    r"programdata\microsoft\windows defender",
     r"windows\softwaredistribution",
+    r"program files\windows nt",
+    r"programdata\microsoft\windows defender",
     r"appdata\local\microsoft\windows\explorer\thumbcache",
     # 微信等用户数据，绝不自动删除
+    r"weixin",
     r"weixinshuju",
     r"xwechat_files",
     r"\.git",
@@ -70,11 +73,11 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "gpu_caches": {
         "label": "GPU 着色器缓存",
-        "description": "NVIDIA DXCache / GLCache，可安全清理并自动重建",
+        "description": "NVIDIA / AMD 着色器缓存，可安全清理并自动重建",
     },
     "web_cache": {
         "label": "浏览器/网页缓存",
-        "description": "Edge、Steam 网页缓存、INetCache",
+        "description": "Edge、Chrome、Firefox、Steam 网页缓存、INetCache",
     },
     "wechat_cache": {
         "label": "微信运行缓存",
@@ -130,7 +133,11 @@ def _builtin_specs() -> list[dict[str, Any]]:
             "label": CATEGORY_META["system_temp"]["label"],
             "targets": [
                 {"type": "clear_dir", "path": _temp(), "label": "用户临时文件"},
-                {"type": "clear_dir", "path": os.path.join(_windir(), "Temp"), "label": "系统临时文件"},
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "CrashDumps"),
+                    "label": "崩溃转储缓存",
+                },
                 {
                     "type": "glob_files",
                     "base": os.path.join(_local(), "Microsoft", "Windows", "Explorer"),
@@ -163,6 +170,17 @@ def _builtin_specs() -> list[dict[str, Any]]:
                     "path": os.path.join(_local(), "NVIDIA", "GLCache"),
                     "label": "NVIDIA GLCache",
                 },
+                # AMD/Intel 着色器缓存，同样会自行重建
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "AMD", "DXCache"),
+                    "label": "AMD DXCache",
+                },
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "AMD", "GLCache"),
+                    "label": "AMD GLCache",
+                },
             ],
         },
         {
@@ -193,6 +211,54 @@ def _builtin_specs() -> list[dict[str, Any]]:
                     "path": os.path.join(_local(), "Microsoft", "Windows", "INetCache"),
                     "label": "INetCache",
                 },
+                # Edge 顶层真正会自行重建的缓存，glob("*/Cache") 覆盖不到这些目录
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "component_crx_cache"),
+                    "label": "Edge 组件缓存",
+                },
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "extensions_crx_cache"),
+                    "label": "Edge 扩展缓存",
+                },
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "GrShaderCache"),
+                    "label": "Edge 着色器缓存",
+                },
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "ShaderCache"),
+                    "label": "Edge 常驻着色器缓存",
+                },
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "GPUPersistentCache"),
+                    "label": "Edge GPU 持久缓存",
+                },
+                # 其它常见浏览器缓存（跨机器通用，均只清缓存内容、保留目录）
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
+                    "pattern": "*/Cache",
+                    "action": "clear",
+                    "label": "Chrome 缓存",
+                },
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
+                    "pattern": "*/Code Cache",
+                    "action": "clear",
+                    "label": "Chrome 代码缓存",
+                },
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Mozilla", "Firefox", "Profiles"),
+                    "pattern": "*/cache2",
+                    "action": "clear",
+                    "label": "Firefox 缓存",
+                },
             ],
         },
         {
@@ -215,6 +281,13 @@ def _builtin_specs() -> list[dict[str, Any]]:
                     "path": os.path.join(_local(), "perfectworldarena-updater", "pending"),
                     "label": "完美世界更新包缓存",
                 },
+                # 实测本机更新包缓存的残留不在 pending 子目录，而是根目录的 installer.exe（约 264MB）
+                {
+                    "type": "glob_files",
+                    "base": os.path.join(_local(), "perfectworldarena-updater"),
+                    "pattern": "installer*.exe",
+                    "label": "完美世界更新安装包残留",
+                },
             ],
         },
         {
@@ -229,18 +302,15 @@ def _builtin_specs() -> list[dict[str, Any]]:
                 {
                     "type": "find_dirs",
                     "bases": ["<CWD>"],
+                    # 只删必然可再生的纯缓存目录；不带 dist/build/node_modules 等通用名，避免误删
                     "names": [
                         "__pycache__",
                         ".pytest_cache",
                         ".mypy_cache",
                         ".ruff_cache",
-                        ".next",
-                        "dist",
-                        "build",
-                        "node_modules",
                     ],
                     "action": "delete",
-                    "label": "散落构建产物",
+                    "label": "散落工具缓存",
                 },
             ],
         },

@@ -137,10 +137,15 @@ def empty_recycle_bin() -> dict[str, int]:
         SHERB_NOSOUND = 0x00000004
         flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND
         shell32 = ctypes.windll.shell32
+        shell32.SHEmptyRecycleBinW.restype = ctypes.c_long
         # 第三个参数正是一个字符的垃圾箱根目录路径；传 None 表示所有驱动器
         result = shell32.SHEmptyRecycleBinW(None, None, flags)
+        # S_OK = 0 表示成功清空；
+        # S_FALSE = 1 / E_UNEXPECTED = 0x8000FFFF 表示回收站本来就空（无操作），不算失败
         if result == 0:  # S_OK
             return {"deleted": 1, "failed": 0, "freed": 0}
+        if result in (1, -2147418113):  # S_FALSE, E_UNEXPECTED (0x8000FFFF)
+            return {"deleted": 0, "failed": 0, "freed": 0}
         return {"deleted": 0, "failed": 1, "freed": 0}
     except Exception:  # noqa: BLE001
         return {"deleted": 0, "failed": 1, "freed": 0}

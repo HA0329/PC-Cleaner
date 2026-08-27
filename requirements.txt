@@ -1,0 +1,5 @@
+# 运行时使用 Python 标准库即可，无需额外依赖。
+# 建议安装 send2trash，让删除默认进入回收站（可恢复，更安全）：
+#   pip install send2trash
+# 或一次性安装全部（含开发依赖）：
+#   pip install -e ".[all]"

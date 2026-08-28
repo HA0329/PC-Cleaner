@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 (2026-02)
+
+### 新功能（借鉴 GitHub 开源清理工具）
+- **风险分级**（借鉴 windows-cleaner-cli）：分类标记 🟢 安全 / 🟡 一般 / 🔴 高风险；
+  高风险分类（downloads / dev_purge / browser_privacy / windows_old）默认隐藏，
+  需 `--risky` 或配置 `show_risky`；`--all` 不会包含它们，`--clean` 显式指定时警告。
+- **审计日志 + 清理历史**（借鉴 sifty）：每次清理写入 `history.json` 与 `audit.log`；
+  新增 `--history` 查看历史、`--undo-last` 从回收站恢复最近一次清理
+  （解析 `$Recycle.Bin` 的 `$I`/`$R` 映射）。
+- **管理员深度清理分类 `system_admin`**（借鉴 sifty / WinPurge）：
+  Windows 更新缓存、Prefetch、事件日志归档、系统崩溃转储；
+  未提权自动跳过并提示，新增 `--admin` 一键 UAC 提权重启。
+- **白名单清空例外**：`ALLOWED_CLEAR_ROOTS` 允许内置规则清空受保护前缀下
+  明确可重建的缓存（如 `C:\Windows\SoftwareDistribution\Download`），
+  删除目录本身仍被二次防御拒绝。
+- **安全擦除 `--shred`**（借鉴 BleachBit / KCleaner）：永久删除前随机覆写一遍。
+- **一键体检 `--checkup`**（借鉴 sifty）：只读汇总管理员状态、磁盘可用、
+  回收站占用、可清理分类与上次清理记录。
+- **配置导入导出**（借鉴 Win11Debloat）：`--export-config` / `--import-config`。
+- **管道自动 JSON**（借鉴 sifty）：stdout 非终端且为只读扫描时自动输出 JSON。
+- **`PC_CLEANER_HOME` 环境变量**：把配置/历史/审计日志重定向到任意目录
+  （便携运行不写系统盘）。
+- **更多清理细节**：Brave / Vivaldi / Opera 缓存与 GPU 缓存、Explorer 图标缓存、
+  NuGet / Gradle / Go 模块缓存、下载目录 `.exe`/`.msi` 安装包、系统崩溃转储。
+
+### 安全加固
+- 删除守卫区分动作：白名单目录仅允许 CLEAR（清空内容），DELETE 目录本身仍拒绝。
+- `--json` 输出新增 `risk` / `requires_admin` / `admin_blocked` / `admin` 字段。
+
 ## 0.2.0 (2025-01)
 
 ### 安全加固

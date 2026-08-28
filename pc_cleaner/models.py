@@ -78,6 +78,12 @@ class CategoryResult:
     #: 扫描时跳过/无法统计的条目数
     skipped: int = 0
     scanned: bool = False
+    #: 风险等级: safe(绿色,随便清) / moderate(黄色,一般安全) / risky(红色,需显式开启)
+    risk: str = "safe"
+    #: 该分类是否需要管理员权限
+    requires_admin: bool = False
+    #: 因缺少管理员权限而未扫描(True 时 targets 为空)
+    admin_blocked: bool = False
 
     @property
     def total_size(self) -> int:

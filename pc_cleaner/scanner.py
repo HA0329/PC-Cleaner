@@ -21,6 +21,8 @@ from .rules import (
     DEFAULT_SKIP_DIRNAMES,
     category_label,
     get_protected_patterns,
+    is_within_clear_root,
+    spec_requires_admin,
 )
 
 
@@ -38,10 +40,24 @@ def normalize(path: Path) -> str:
     return os.path.normcase(str(path))
 
 
+def is_admin() -> bool:
+    """当前进程是否拥有管理员权限（Windows）。非 Windows 视为 False。"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def make_protect_check(user_patterns: list[str] | None = None):
     """返回一个 ``(path) -> bool`` 的保护判断函数。
 
     True 表示该路径受保护（应跳过）。子串匹配，大小写不敏感。
+    例外：位于 ``ALLOWED_CLEAR_ROOTS`` 白名单目录（含其内部）的路径
+    不被视为受保护，从而允许内置规则清空其内容（如 Windows 更新缓存）。
     """
     patterns = [normalize(p) for p in get_protected_patterns()]
     if user_patterns:
@@ -52,6 +68,8 @@ def make_protect_check(user_patterns: list[str] | None = None):
             s = normalize(path)
         except (OSError, ValueError):
             return True  # 无法判断的路径，保守跳过
+        if is_within_clear_root(path):
+            return False
         return any(p in s for p in patterns if p)
 
     return _check
@@ -383,7 +401,17 @@ def scan_spec(spec: dict[str, Any], is_protected=None) -> CategoryResult:
     key = spec["key"]
     if is_protected is None:
         is_protected = make_protect_check()
-    result = CategoryResult(key=key, label=spec.get("label") or category_label(key))
+    result = CategoryResult(
+        key=key,
+        label=spec.get("label") or category_label(key),
+        risk=str(spec.get("risk") or "safe"),
+        requires_admin=spec_requires_admin(spec),
+    )
+    # 需要管理员权限但当前未提权：跳过扫描并给出提示
+    if result.requires_admin and not is_admin():
+        result.admin_blocked = True
+        result.scanned = True
+        return result
     seen: set[str] = set()
     for target_spec in spec.get("targets", []):
         ttype = target_spec.get("type")

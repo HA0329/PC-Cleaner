@@ -14,20 +14,32 @@ import argparse
 import json
 import shutil
 import sys
+from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .config import load_config, save_config
+from .config import DEFAULTS, load_config, save_config, update_config
 from .console import bold, cyan, dim, green, pad_cjk, red, yellow
 from .engine import (
     CleanMode,
     delete_targets,
     empty_recycle_bin,
     recycle_available,
+    restore_paths,
+)
+from .history import (
+    append_session,
+    load_history,
+    make_session,
+    record_deletion_audit,
 )
 from .models import CategoryResult, format_size
-from .rules import get_all_category_specs
-from .scanner import recycle_bin_size, scan_all
+from .rules import (
+    get_all_category_specs,
+    is_risky_spec,
+    spec_requires_admin,
+)
+from .scanner import is_admin, recycle_bin_size, scan_all
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +85,19 @@ def _parse_keys(raw: str) -> list[str]:
     ]
 
 
+def _risk_badge(risk: str) -> str:
+    """风险等级彩色徽标（借鉴 windows-cleaner-cli 的安全色分级）。"""
+    if risk == "safe":
+        return green("●")
+    if risk == "moderate":
+        return yellow("●")
+    return red("●")
+
+
+def _admin_tag(requires_admin: bool) -> str:
+    return yellow(" [需管理员]") if requires_admin else ""
+
+
 # ---------------------------------------------------------------------------
 # 预览 / 菜单
 # ---------------------------------------------------------------------------
@@ -93,22 +118,31 @@ def _preview_targets(targets: list[Any], max_lines: int = 12) -> None:
     )
 
 
-def _print_full_menu(results: list[CategoryResult], bin_size: int) -> None:
+def _print_full_menu(results: list[CategoryResult], bin_size: int, show_risky: bool) -> None:
     _echo("")
     _echo(bold("可清理的分类："))
     for i, res in enumerate(results, start=1):
-        if res.targets:
+        badge = _risk_badge(res.risk)
+        tag = _admin_tag(res.requires_admin)
+        if res.admin_blocked:
             _echo(
-                f"  {cyan(str(i))}. {res.label}  "
+                f"  {cyan(str(i))}. {badge} {res.label}{tag}  "
+                f"({yellow('需管理员权限，当前未提权，已跳过')})"
+            )
+        elif res.targets:
+            _echo(
+                f"  {cyan(str(i))}. {badge} {res.label}{tag}  "
                 f"({res.total_count} 项, 约 {green(format_size(res.liberatable))})"
             )
         else:
-            _echo(f"  {cyan(str(i))}. {res.label}  (0 项)")
+            _echo(f"  {cyan(str(i))}. {badge} {res.label}{tag}  (0 项)")
     if bin_size > 0:
         _echo(f"  {red('r')}. 回收站 (清空, 占用 {yellow(format_size(bin_size))})")
     else:
         _echo("  r. 回收站 (清空)")
     _echo("  q. 退出")
+    if not show_risky:
+        _echo(dim("  提示：输入 x 可查看高风险分类（需 --risky 或配置 show_risky）"))
     _echo("")
 
 
@@ -161,6 +195,7 @@ def _run_clean_flow(
     empty_bin: bool,
     cfg: dict[str, Any],
     recycle_fallback: bool = False,
+    shred: bool = False,
 ) -> dict[str, Any]:
     """对选中的分类执行：预览 -> 确认 -> 删除。"""
     targets = _collect_targets(selected)
@@ -176,6 +211,9 @@ def _run_clean_flow(
 
     if empty_bin and not dry_run:
         _echo(f"  【回收站】将清空回收站（{red('不可恢复')}）。")
+
+    if shred and not dry_run and mode is CleanMode.PERMANENT:
+        _echo(yellow("  shred 模式：永久删除前将随机覆写文件内容一遍。"))
 
     if dry_run:
         _echo("")
@@ -195,6 +233,12 @@ def _run_clean_flow(
                 empty_bin = False
 
     # 执行
+    enable_history = bool(cfg.get("enable_history", True))
+    audit_log = None
+    if enable_history:
+        def audit_log(path, size, mode_name) -> None:
+            record_deletion_audit(path, size, mode_name)
+
     result: dict[str, Any] = {"deleted": 0, "failed": 0, "freed": 0, "empty_bin": empty_bin}
     if targets:
         res = delete_targets(
@@ -202,6 +246,8 @@ def _run_clean_flow(
             mode,
             on_progress=_progress_line,
             recycle_fallback=recycle_fallback,
+            shred=shred,
+            audit=audit_log,
         )
         result["deleted"] += res["deleted"]
         result["failed"] += res["failed"]
@@ -211,6 +257,19 @@ def _run_clean_flow(
         bin_res = empty_recycle_bin()
         result["empty_bin_result"] = bin_res
         _echo("回收站清空完成。")
+
+    # 记录历史会话（--history / --undo-last 使用）
+    if enable_history and (targets or empty_bin):
+        session = make_session(
+            mode=mode.value,
+            deleted=result["deleted"],
+            failed=result["failed"],
+            freed=result["freed"],
+            categories=[r.key for r in selected] + (["recycle_bin"] if empty_bin else []),
+            targets=[{"path": str(t.path), "size": t.size} for t in targets],
+            note="shred" if shred else "",
+        )
+        append_session(session)
 
     _echo("")
     _echo(
@@ -280,6 +339,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--yes", action="store_true", help="跳过交互确认（谨慎使用）")
     p.add_argument("--json", action="store_true", help="以 JSON 输出结果（默认只扫描）")
+    p.add_argument("--risky", action="store_true", help="显示/允许高风险分类（下载旧文件、构建产物、隐私数据等）")
+    p.add_argument("--shred", action="store_true", help="永久删除前随机覆写文件内容一遍（隐私增强）")
+    p.add_argument(
+        "--history",
+        action="store_true",
+        help="显示清理历史（时间/模式/释放空间/分类）",
+    )
+    p.add_argument(
+        "--undo-last",
+        action="store_true",
+        help="把最近一次「进回收站」的清理从回收站恢复回来",
+    )
+    p.add_argument(
+        "--checkup",
+        action="store_true",
+        help="一键体检：只读汇总管理员状态、磁盘可用、回收站、可清理分类",
+    )
+    p.add_argument(
+        "--admin",
+        action="store_true",
+        help="以管理员身份重新启动（UAC 提权）后再执行",
+    )
+    p.add_argument("--export-config", metavar="PATH", help="把当前配置导出到指定 JSON 文件")
+    p.add_argument("--import-config", metavar="PATH", help="从 JSON 文件导入配置")
     p.add_argument(
         "--show-config",
         action="store_true",
@@ -299,6 +382,165 @@ def _resolve_mode(args, cfg: dict[str, Any]) -> CleanMode:
     return CleanMode.PERMANENT
 
 
+# ---------------------------------------------------------------------------
+# 子命令：历史 / 撤销 / 体检 / 配置导入导出 / 提权重启
+# ---------------------------------------------------------------------------
+def _cmd_history() -> int:
+    sessions = load_history()
+    if not sessions:
+        _echo(yellow("暂无清理历史。"))
+        return 0
+    _echo(bold(f"清理历史（共 {len(sessions)} 次会话，最新在前）："))
+    for i, s in enumerate(reversed(sessions), start=1):
+        note = f" [{s.get('note')}]" if s.get("note") else ""
+        _echo(
+            f"  {cyan(str(i))}. {s.get('ts', '?')}  mode={s.get('mode', '?')}{note}"
+        )
+        _echo(
+            f"      删除 {green(str(s.get('deleted', 0)))} 项, "
+            f"失败 {yellow(str(s.get('failed', 0)))} 项, "
+            f"释放 {green(format_size(s.get('freed', 0)))} | "
+            f"分类: {', '.join(s.get('categories') or [])}"
+        )
+    return 0
+
+
+def _cmd_undo_last() -> int:
+    sessions = load_history()
+    if not sessions:
+        _echo(yellow("暂无清理历史，无法撤销。"))
+        return 0
+    last = sessions[-1]
+    targets = [t.get("path") for t in (last.get("targets") or []) if t.get("path")]
+    if last.get("mode") != CleanMode.RECYCLE.value:
+        _echo(yellow("最近一次清理不是「进回收站」模式，无法恢复（永久删除不可撤销）。"))
+        return 1
+    if not targets:
+        _echo(yellow("最近一次会话没有可恢复的文件目标。"))
+        return 0
+    _echo(
+        bold(
+            f"将尝试从回收站恢复 {len(targets)} 个目标"
+            f"（来自 {last.get('ts', '?')} 的清理）："
+        )
+    )
+    res = restore_paths(targets)
+    for p in res["restored"]:
+        _echo(f"  {green('✓')} 已恢复: {p}")
+    for s in res["skipped"]:
+        _echo(f"  {yellow('✗')} 跳过: {s}")
+    _echo(f"恢复成功 {len(res['restored'])} 项, 跳过 {len(res['skipped'])} 项。")
+    return 0
+
+
+def _cmd_checkup(specs: list[dict[str, Any]], show_risky: bool) -> int:
+    """一键体检：只读汇总（借鉴 sifty 的 checkup）。"""
+    from .scanner import _system_drives
+
+    _echo(bold(f"=== PC Junk Cleaner {__version__} 体检报告 ==="))
+    _echo(
+        f"  管理员权限: {'是' if is_admin() else '否（系统深度清理分类将被跳过，可用 --admin 提权）'}"
+    )
+    _echo(
+        f"  回收站支持: {'是（删除可恢复）' if recycle_available() else '否（将永久删除，建议 pip install send2trash）'}"
+    )
+    for drive in _system_drives():
+        try:
+            u = shutil.disk_usage(drive)
+            _echo(
+                f"  磁盘 {drive} 总 {format_size(u.total)} / 已用 {format_size(u.used)}"
+                f" / 可用 {green(format_size(u.free))}"
+            )
+        except OSError:
+            continue
+    if sys.platform == "win32":
+        _echo(f"  回收站占用: {format_size(recycle_bin_size())}")
+
+    results = scan_all(specs)
+    visible = [r for r in results if show_risky or r.risk != "risky"]
+    total = sum(r.liberatable for r in visible)
+    _echo("")
+    _echo(bold("可清理分类（只读扫描，未删除任何内容）："))
+    for r in visible:
+        if r.admin_blocked:
+            _echo(f"  {_risk_badge(r.risk)} {r.label}{_admin_tag(True)}  需管理员，已跳过")
+        elif r.targets:
+            _echo(
+                f"  {_risk_badge(r.risk)} {r.label}  {r.total_count} 项, "
+                f"约 {green(format_size(r.liberatable))}"
+            )
+        else:
+            _echo(f"  {_risk_badge(r.risk)} {r.label}  0 项")
+    if not show_risky:
+        hidden = [r for r in results if r.risk == "risky"]
+        if hidden:
+            _echo(
+                dim(
+                    f"  （另有 {len(hidden)} 个高风险分类未显示，"
+                    "可用 --risky 查看，如 downloads / dev_purge / browser_privacy）"
+                )
+            )
+    _echo("-" * 56)
+    _echo(f"  合计可释放: {green(format_size(total))}")
+    sessions = load_history()
+    if sessions:
+        last = sessions[-1]
+        _echo(
+            dim(
+                f"  上次清理: {last.get('ts', '?')} 释放 "
+                f"{format_size(last.get('freed', 0))}"
+            )
+        )
+    return 0
+
+
+def _cmd_export_config(path: str) -> int:
+    try:
+        Path(path).write_text(
+            json.dumps(load_config(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        _echo(red(f"导出配置失败: {exc}"))
+        return 1
+    _echo(green(f"配置已导出到: {path}"))
+    return 0
+
+
+def _cmd_import_config(path: str) -> int:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _echo(red(f"读取配置文件失败: {exc}"))
+        return 1
+    if not isinstance(data, dict):
+        _echo(red("配置必须是 JSON 对象。"))
+        return 1
+    patch = {k: v for k, v in data.items() if k in DEFAULTS}
+    update_config(patch)
+    _echo(green(f"已导入 {len(patch)} 个配置项: {', '.join(sorted(patch))}"))
+    return 0
+
+
+def _relaunch_as_admin(argv: list[str]) -> int:
+    """通过 UAC 以管理员身份重新启动（Windows）。"""
+    import ctypes
+
+    args = [a for a in argv if a != "--admin"]
+    params = f"-m pc_cleaner {' '.join(args)}".strip()
+    _echo(yellow("请求管理员权限（UAC），将重新启动..."))
+    try:
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, params, None, 1
+        )
+        if result <= 32:
+            _echo(red("提权启动失败，请手动以管理员身份运行。"))
+            return 1
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        _echo(red(f"提权失败: {exc}"))
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -314,6 +556,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cfg = load_config()
+
+    if args.export_config:
+        return _cmd_export_config(args.export_config)
+    if args.import_config:
+        return _cmd_import_config(args.import_config)
+    if args.history:
+        return _cmd_history()
+    if args.undo_last:
+        return _cmd_undo_last()
+
+    # 需管理员权限时经 UAC 提权重启（Windows）
+    if args.admin and not is_admin():
+        return _relaunch_as_admin(argv if argv is not None else sys.argv[1:])
+
     specs = get_all_category_specs(merge_custom=True)
 
     # 配置可限制只扫描部分分类
@@ -321,15 +577,30 @@ def main(argv: list[str] | None = None) -> int:
     if enabled:
         specs = [s for s in specs if s["key"].lower() in enabled]
 
+    show_risky = args.risky or bool(cfg.get("show_risky", False))
     mode = _resolve_mode(args, cfg)
     excluded = set(_parse_keys(args.exclude)) if args.exclude else set()
 
+    # 管道输出时自动切换 JSON（借鉴 sifty：只对只读扫描命令生效，绝不自动删除）
+    if (
+        not args.json
+        and not sys.stdout.isatty()
+        and not (args.clean or args.all)
+        and not args.checkup
+    ):
+        args.json = True
+
     if args.json:
-        _json_stdout_mode(args, specs, cfg, mode, excluded)
+        _json_stdout_mode(args, specs, cfg, mode, excluded, show_risky)
         return 0
 
-    # 扫描（不含回收站）
-    results = scan_all(specs)
+    if args.checkup:
+        return _cmd_checkup(specs, show_risky)
+
+    # 全量扫描（含高风险与需管理员分类，后者会被标记跳过）
+    all_results = scan_all(specs)
+    # 展示用：默认隐藏高风险分类
+    results = [r for r in all_results if show_risky or r.risk != "risky"]
 
     if args.list:
         from .scanner import print_report
@@ -339,11 +610,15 @@ def main(argv: list[str] | None = None) -> int:
         _print_disk_free(results)
         if sys.platform == "win32":
             _echo(f"回收站占用: {format_size(recycle_bin_size())}")
+        if not show_risky:
+            hidden = [r for r in all_results if r.risk == "risky"]
+            if hidden:
+                _echo(dim("（高风险分类未显示，可用 --risky 查看）"))
         return 0
 
     # --- 交互式菜单 ---
     if not args.clean and not args.all:
-        return _interactive(results, specs, mode, args, cfg)
+        return _interactive(results, specs, mode, args, cfg, show_risky)
 
     # --- 选择分类 ---
     selected: list[CategoryResult] = []
@@ -354,8 +629,22 @@ def main(argv: list[str] | None = None) -> int:
         empty_bin = "recycle_bin" not in excluded
     else:
         keys = _parse_keys(args.clean)
-        known = {r.key.lower() for r in results}
-        selected = [r for r in results if r.key.lower() in keys and r.key.lower() not in excluded]
+        risky_named = [k for k in keys if k != "recycle_bin"]
+        if any(
+            r.risk == "risky" and r.key.lower() in risky_named for r in all_results
+        ) and not show_risky:
+            _echo(
+                yellow(
+                    "注意：--clean 显式指定了高风险分类，"
+                    "请仔细核对下面的预览清单后再确认。"
+                )
+            )
+        known = {r.key.lower() for r in all_results}
+        selected = [
+            r
+            for r in all_results
+            if r.key.lower() in keys and r.key.lower() not in excluded
+        ]
         empty_bin = "recycle_bin" in keys and "recycle_bin" not in excluded
         missing = [k for k in keys if k not in known and k != "recycle_bin"]
         if missing:
@@ -366,6 +655,20 @@ def main(argv: list[str] | None = None) -> int:
             _echo(yellow("所选分类均已被 --exclude 排除，未执行任何操作。"))
             return 0
 
+    # 需要管理员但未提权的分类：提示并跳过
+    blocked = [r for r in selected if r.admin_blocked]
+    if blocked:
+        for r in blocked:
+            _echo(
+                yellow(
+                    f"分类「{r.label}」需要管理员权限，当前未提权，已跳过"
+                    "（可用 --admin 提权后重试）。"
+                )
+            )
+        selected = [r for r in selected if not r.admin_blocked]
+        if not selected and not empty_bin:
+            return 0
+
     _run_clean_flow(
         selected,
         dry_run=args.dry_run,
@@ -374,6 +677,7 @@ def main(argv: list[str] | None = None) -> int:
         empty_bin=empty_bin,
         cfg=cfg,
         recycle_fallback=args.recycle_fallback or bool(cfg.get("recycle_error_fallback", False)),
+        shred=args.shred,
     )
     return 0
 
@@ -384,6 +688,7 @@ def _interactive(
     mode: CleanMode,
     args,
     cfg: dict[str, Any],
+    show_risky: bool,
 ) -> int:
     """交互式菜单：选择 -> 预览 -> 确认 -> 清理，可循环继续。"""
     from .scanner import print_report
@@ -394,6 +699,10 @@ def _interactive(
         _echo(green("回收站支持: 是（删除可恢复）"))
     else:
         _echo(yellow("回收站支持: 否（将永久删除，请谨慎！建议 pip install send2trash）"))
+    if is_admin():
+        _echo(green("管理员权限: 是"))
+    else:
+        _echo(yellow("管理员权限: 否（系统深度清理分类将跳过，可用 --admin 提权）"))
 
     while True:
         print_report(results)
@@ -407,7 +716,7 @@ def _interactive(
         empty_bin = False
         n = len(results)
         while True:
-            _print_full_menu(results, bin_size)
+            _print_full_menu(results, bin_size, show_risky)
             choice = ""
             try:
                 choice = input("请选择要清理的分类（如 1,3 或 all；q 退出）: ").strip()
@@ -416,6 +725,17 @@ def _interactive(
                 return 0
             if choice.lower() in ("q", "quit", "exit"):
                 return 0
+            if choice.lower() in ("x", "risky"):
+                # 切换高风险分类显示并重新扫描
+                show_risky = not show_risky
+                if show_risky:
+                    _echo(yellow("已显示高风险分类（删除前请仔细核对预览）。"))
+                else:
+                    _echo(dim("已隐藏高风险分类。"))
+                fresh = scan_all(specs)
+                results = [r for r in fresh if show_risky or r.risk != "risky"]
+                n = len(results)
+                continue
             sel = _parse_selection(choice, n)
             if sel == "none":
                 selected = []
@@ -444,6 +764,7 @@ def _interactive(
             empty_bin=empty_bin,
             cfg=cfg,
             recycle_fallback=args.recycle_fallback or bool(cfg.get("recycle_error_fallback", False)),
+            shred=args.shred,
         )
 
         # 循环：重新扫描并继续
@@ -454,7 +775,8 @@ def _interactive(
             return 0
         if not again:
             return 0
-        results = scan_all(specs)
+        fresh = scan_all(specs)
+        results = [r for r in fresh if show_risky or r.risk != "risky"]
 
 
 def _json_stdout_mode(
@@ -463,6 +785,7 @@ def _json_stdout_mode(
     cfg: dict[str, Any],
     mode: CleanMode,
     excluded: set[str],
+    show_risky: bool = False,
 ) -> None:
     """--json 输出模式。
 
@@ -473,11 +796,15 @@ def _json_stdout_mode(
     payload: dict[str, Any] = {
         "version": __version__,
         "recycle_available": recycle_available(),
+        "admin": is_admin(),
         "dry_run": args.dry_run,
         "categories": [
             {
                 "key": r.key,
                 "label": r.label,
+                "risk": r.risk,
+                "requires_admin": r.requires_admin,
+                "admin_blocked": r.admin_blocked,
                 "count": r.total_count,
                 "size_bytes": r.liberatable,
                 "size": format_size(r.liberatable),
@@ -491,7 +818,8 @@ def _json_stdout_mode(
 
     if args.clean or args.all:
         if args.all:
-            keys = [r.key for r in results] + ["recycle_bin"]
+            keys = [r.key for r in results if show_risky or r.risk != "risky"]
+            keys.append("recycle_bin")
         else:
             keys = _parse_keys(args.clean)
         keys = [k for k in keys if k not in excluded]
@@ -499,7 +827,7 @@ def _json_stdout_mode(
         if args.dry_run:
             payload["action"] = {"dry_run": True, "selected": keys}
         elif args.yes:
-            selected = [r for r in results if r.key in keys]
+            selected = [r for r in results if r.key in keys and not r.admin_blocked]
             targets = _collect_targets(selected)
             res = delete_targets(
                 targets,
@@ -507,6 +835,7 @@ def _json_stdout_mode(
                 on_progress=_progress_line,
                 recycle_fallback=args.recycle_fallback
                 or bool(cfg.get("recycle_error_fallback", False)),
+                shred=args.shred,
             )
             action: dict[str, Any] = {
                 "mode": mode.value,

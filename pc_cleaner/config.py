@@ -1,6 +1,9 @@
 """配置读写：保存用户的回收站偏好、额外保护路径与自定义规则。
 
 配置文件位于 ``%APPDATA%\\pc_cleaner\\config.json``（Windows）。
+
+可用环境变量 ``PC_CLEANER_HOME`` 把整个配置/历史/审计目录重定向到其它位置
+（例如工作区），方便便携运行且不往系统盘写东西。
 """
 
 from __future__ import annotations
@@ -12,13 +15,29 @@ from typing import Any
 
 
 def config_dir() -> Path:
-    """返回配置目录（跨平台）。"""
-    base = os.environ.get("APPDATA") or os.path.expanduser(r"~")
+    """返回配置目录（跨平台）。
+
+    优先使用环境变量 ``PC_CLEANER_HOME``（其下的 pc_cleaner 子目录），
+    否则回退到 ``%APPDATA%\\pc_cleaner``。
+    """
+    base = os.environ.get("PC_CLEANER_HOME") or os.environ.get("APPDATA")
+    if not base:
+        base = os.path.expanduser(r"~")
     return Path(base) / "pc_cleaner"
 
 
 def config_path() -> Path:
     return config_dir() / "config.json"
+
+
+def history_path() -> Path:
+    """结构化清理历史（--history / --undo-last 使用）。"""
+    return config_dir() / "history.json"
+
+
+def audit_path() -> Path:
+    """人类可读的删除审计日志。"""
+    return config_dir() / "audit.log"
 
 
 DEFAULTS: dict[str, Any] = {
@@ -29,6 +48,8 @@ DEFAULTS: dict[str, Any] = {
     "dev_artifact_bases": [],        # find_dirs 的额外基目录（默认含当前工作目录）
     "enabled_categories": [],        # 非空时只扫描这些分类（其余分类隐藏）
     "preview_lines": 12,             # 每个分类预览时最多展示的目标行数
+    "show_risky": False,             # 交互菜单是否显示高风险分类（需 --risky 或设为 true）
+    "enable_history": True,          # 是否记录清理历史与审计日志
 }
 
 

@@ -7,6 +7,18 @@
 告诉你每个分类能释放多少空间、列出将删除的文件，**经你确认后**才动手。
 默认可以删除到回收站（可恢复），并且内置了受保护路径保护与删除前二次防御。
 
+v0.4 升级（借鉴系统自带的经典 `clean.bat` 垃圾清理脚本）：
+
+- **补齐系统 Temp**：新增清理 `C:\Windows\Temp`（之前只清用户 Temp），
+  通过白名单清空例外实现——只清空内容、保留目录，删除目录本身仍被拒绝。
+- **最近文档/跳转列表**：清空 `%APPDATA%\Microsoft\Windows\Recent`，
+  对应 clean.bat 的 `del %userprofile%\recent\*.*`（现代路径，不影响文件本身）。
+- **chkdsk 残留**：删除卷根目录的 `found.000/found.001` 等磁盘扫描碎片目录
+  （clean.bat 只做全盘递归 `*.chk`，这里改为**只删 found.* 目录本身**，更安全）。
+- **更新日志与备份残留**：清理 `%WINDIR%\KB*.log` 更新日志、`%WINDIR%` 顶层
+  `*.bak` 备份残留、`%WINDIR%\Logs\WindowsUpdate` 诊断日志。
+- 全部沿用既有安全模型：需管理员、先预览后确认、逐项容错、保护路径拦截。
+
 v0.3 升级（借鉴 GitHub 开源清理工具）：
 
 - **风险分级**（借鉴 [windows-cleaner-cli](https://github.com/guhcostan/windows-cleaner-cli)）：
@@ -29,14 +41,14 @@ v0.3 升级（借鉴 GitHub 开源清理工具）：
 
 | 分类 key | 名称 | 风险 | 最近一次扫描 |
 | --- | --- | --- | --- |
-| `system_temp` | 系统临时文件 | 🟢 | 用户 Temp、缩略图/图标缓存、WebCache、WER 等 |
+| `system_temp` | 系统临时文件 | 🟢 | 用户 Temp、缩略图/图标缓存、WebCache、WER、最近文档/跳转列表 |
 | `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA DXCache / GLCache |
 | `web_cache` | 浏览器/网页缓存 | 🟢 | Edge/Chrome/Firefox/Brave/Vivaldi/Opera/Steam |
 | `wechat_cache` | 微信运行缓存 | 🟢 | xplugin / radium / log / crashinfo |
 | `game_caches` | 游戏平台缓存 | 🟡 | 完美世界更新包、Steam 缓存/日志 |
 | `dev_caches` | 开发工具缓存 | 🟡 | pnpm / pip / npm / uv / yarn / Go / cargo / NuGet / Gradle |
 | `downloads` | 下载/旧文件 | 🔴 | 大文件、久未使用文件、安装包（默认隐藏） |
-| `system_admin` | 系统深度清理 | 🟡 | Windows 更新缓存、Prefetch、事件日志归档、崩溃转储（需管理员） |
+| `system_admin` | 系统深度清理 | 🟡 | Windows 更新缓存、系统 Temp、chkdsk 残留、更新日志、备份残留、Prefetch、事件日志归档、崩溃转储（需管理员） |
 | `windows_old` | 旧版 Windows 残留 | 🔴 | `C:\Windows.old`（默认隐藏，需管理员） |
 | `dev_purge` | 项目构建产物 | 🔴 | 散落 node_modules / dist / build / target（默认隐藏） |
 | `browser_privacy` | 浏览器隐私数据 | 🔴 | Cookie 与浏览历史（默认隐藏，会退出登录） |
@@ -224,7 +236,7 @@ python -m pc_cleaner --clean system_admin --recycle --admin
 
 | 分类 key | 名称 | 风险 | 清理内容 |
 | --- | --- | --- | --- |
-| `system_temp` | 系统临时文件 | 🟢 | 用户/系统 Temp、缩略图/图标缓存、WebCache、错误报告 |
+| `system_temp` | 系统临时文件 | 🟢 | 用户/系统 Temp、缩略图/图标缓存、WebCache、错误报告、最近文档/跳转列表 |
 | `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA / AMD DXCache / GLCache（可安全清理并重建） |
 | `web_cache` | 浏览器/网页缓存 | 🟢 | Edge/Chrome/Firefox/Brave/Vivaldi/Opera 缓存与 GPU 缓存、Steam htmlcache、INetCache |
 | `wechat_cache` | 微信运行缓存 | 🟢 | xplugin / radium / log / crashinfo（不动聊天数据） |
@@ -232,7 +244,7 @@ python -m pc_cleaner --clean system_admin --recycle --admin
 | `dev_caches` | 开发工具缓存 | 🟡 | pnpm/pip/npm/uv/yarn/Go/cargo/NuGet/Gradle 缓存、`__pycache__`、散落工具缓存 |
 | `downloads` | 下载/旧文件 | 🔴 | Downloads 中的大文件/久未使用文件/安装包（默认隐藏） |
 | `recycle_bin` | 回收站 | 🟡 | 清空回收站（单独确认） |
-| `system_admin` | 系统深度清理 | 🟡 | Windows 更新缓存、Prefetch、事件日志归档、系统崩溃转储（需管理员） |
+| `system_admin` | 系统深度清理 | 🟡 | Windows 更新缓存、系统 Temp、chkdsk 残留(found.*)、更新日志(KB*.log)、备份残留(*.bak)、Prefetch、事件日志归档、系统崩溃转储（需管理员） |
 | `windows_old` | 旧版 Windows 残留 | 🔴 | `C:\Windows.old`（默认隐藏，需管理员，删除不可恢复） |
 | `dev_purge` | 项目构建产物 | 🔴 | 散落 node_modules / dist / build / target / .next 等（默认隐藏） |
 | `browser_privacy` | 浏览器隐私数据 | 🔴 | Cookie 与浏览历史（默认隐藏，会退出登录） |
@@ -281,7 +293,7 @@ pc-cleaner/
 ├── tests/               # 单元测试
 ├── pyproject.toml
 ├── README.md
-├── pc_cleaner.bat       #一键启动
+├── pc_cleaner.bat	#一键启动
 ├── CHANGELOG.md
 └── LICENSE
 ```
@@ -305,7 +317,7 @@ pytest
   <img src="docs/donate.jpg" alt="赞赏码" width="220" />
 </p>
 
-> 图片位于仓库 `docs/donate.jpg`。
+> 图片位于仓库 `docs/donate.jpg`；若尚未上传，请手动将图片放到该路径。
 
 ---
 

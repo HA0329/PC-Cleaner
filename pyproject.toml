@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pc-junk-cleaner"
-version = "0.3.0"
+version = "0.4.0"
 description = "为个人电脑定制的安全垃圾清理工具 (Windows 优先)"
 readme = "README.md"
 license = { text = "MIT" }

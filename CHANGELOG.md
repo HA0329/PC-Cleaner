@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0 (2026-04)
+
+### 新功能（借鉴系统自带的经典 `clean.bat` 垃圾清理脚本）
+- **系统 Temp**：新增清理 `C:\Windows\Temp`（此前仅清用户 Temp）；通过
+  `ALLOWED_CLEAR_ROOTS` 白名单清空例外实现——只清空内容、保留目录本身，
+  删除目录仍被二次防御拒绝。
+- **最近文档/跳转列表**：`system_temp` 新增清空
+  `%APPDATA%\Microsoft\Windows\Recent`（对应 clean.bat 的
+  `del %userprofile%\recent\*.*`，使用现代路径，不影响文件本身）。
+- **chkdsk 残留**：`system_admin` 新增删除卷根目录 `found.*`（found.000 等
+  磁盘扫描碎片目录）；只删目录本身，不做 clean.bat 式的全盘递归 `*.chk`。
+- **更新日志与备份残留**：`system_admin` 新增清理 `%WINDIR%\KB*.log`、
+  `%WINDIR%` 顶层 `*.bak`、`%WINDIR%\Logs\WindowsUpdate` 诊断日志。
+- 全部沿用既有安全模型：需管理员、先预览后确认、逐项容错、受保护路径拦截。
+
+### 其它
+- 项目结构整理：确认 `pc-cleaner/pc-cleaner/` 整份重复副本目录已不在磁盘上，
+  项目为单一干净结构。
+
 ## 0.3.0 (2026-02)
 
 ### 新功能（借鉴 GitHub 开源清理工具）

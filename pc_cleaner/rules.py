@@ -76,6 +76,9 @@ DEFAULT_SKIP_DIRNAMES: set[str] = {
 ALLOWED_CLEAR_ROOTS: set[str] = {
     r"c:\windows\softwaredistribution\download",
     r"c:\windows\prefetch",
+    # 系统 Temp（%WINDIR%\Temp）：位于受保护前缀 windows\temp 之下，
+    # 但内容是可安全重建的临时文件；只允许清空，删除目录本身仍被拒绝。
+    r"c:\windows\temp",
 }
 
 
@@ -91,7 +94,7 @@ def is_within_clear_root(path) -> bool:
 CATEGORY_META: dict[str, dict[str, Any]] = {
     "system_temp": {
         "label": "系统临时文件",
-        "description": "用户/系统 Temp、缩略图/图标缓存、窗口缓存、错误报告",
+        "description": "用户/系统 Temp、缩略图/图标缓存、窗口缓存、错误报告、最近文档",
         "risk": "safe",
     },
     "gpu_caches": {
@@ -131,7 +134,7 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "system_admin": {
         "label": "系统深度清理(需管理员)",
-        "description": "Windows 更新缓存、预读取、事件日志归档、系统崩溃转储",
+        "description": "Windows 更新缓存、系统 Temp、chkdsk 残留、更新日志、备份残留、预读取、事件日志归档、崩溃转储",
         "risk": "moderate",
     },
     "windows_old": {
@@ -210,6 +213,14 @@ def _builtin_specs() -> list[dict[str, Any]]:
                     "type": "clear_dir",
                     "path": os.path.join(_local(), "Microsoft", "Windows", "WER"),
                     "label": "Windows 错误报告",
+                },
+                # 最近文档/跳转列表（%APPDATA%\Microsoft\Windows\Recent）：
+                # 借鉴经典 clean.bat 的 "del %userprofile%\recent\*.*"，
+                # 用现代路径清空；只清"最近使用"记录，不影响文件本身。
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_appdata(), "Microsoft", "Windows", "Recent"),
+                    "label": "最近文档/跳转列表",
                 },
             ],
         },
@@ -538,6 +549,45 @@ def _builtin_specs() -> list[dict[str, Any]]:
                     "type": "clear_dir",
                     "path": os.path.join(_windir(), "Prefetch"),
                     "label": "预读取(Prefetch)",
+                },
+                # 系统 Temp（%WINDIR%\Temp）：经典 clean.bat 的
+                # "rd %windir%\temp & md %windir%\temp"，经白名单清空例外实现，
+                # 只清内容、保留目录本身。
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_windir(), "Temp"),
+                    "label": "系统临时文件(Windows\\Temp)",
+                },
+                # chkdsk/磁盘扫描残留：卷根目录的 found.000/found.001 等目录，
+                # 里面是检出的文件碎片（.chk），纯垃圾，删除整个目录。
+                # 借鉴 clean.bat 的 "del /f /s /q %systemdrive%\*.chk"，但只针对
+                # found.* 目录本身，不做全盘递归，避免误删。
+                {
+                    "type": "glob_dirs",
+                    "base": Path(_windir()).anchor,
+                    "pattern": "found.*",
+                    "action": "delete",
+                    "label": "chkdsk 残留(found.*)",
+                },
+                # Windows 更新安装日志（KB*.log），清理后由系统重新生成
+                {
+                    "type": "glob_files",
+                    "base": _windir(),
+                    "pattern": "KB*.log",
+                    "label": "Windows 更新日志(KB*.log)",
+                },
+                # %WINDIR% 顶层的 .bak 备份残留（逐项容错，被占用/无权限自动跳过）
+                {
+                    "type": "glob_files",
+                    "base": _windir(),
+                    "pattern": "*.bak",
+                    "label": "Windows 备份残留(*.bak)",
+                },
+                # Windows 更新诊断日志（.etl 跟踪文件），系统会自动重建
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_windir(), "Logs", "WindowsUpdate"),
+                    "label": "Windows 更新诊断日志",
                 },
                 # 事件日志归档（Archive-*.evtx）：活跃日志不受影响
                 {

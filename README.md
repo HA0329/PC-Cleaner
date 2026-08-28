@@ -281,6 +281,7 @@ pc-cleaner/
 ├── tests/               # 单元测试
 ├── pyproject.toml
 ├── README.md
+├── pc_cleaner.bat       #一键启动
 ├── CHANGELOG.md
 └── LICENSE
 ```
@@ -304,7 +305,7 @@ pytest
   <img src="docs/donate.jpg" alt="赞赏码" width="220" />
 </p>
 
-> 图片位于仓库 `docs/donate.jpg`；若尚未上传，请手动将图片放到该路径。
+> 图片位于仓库 `docs/donate.jpg`。
 
 ---
 

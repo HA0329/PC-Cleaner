@@ -237,6 +237,28 @@ def _builtin_specs() -> list[dict[str, Any]]:
                     "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "GPUPersistentCache"),
                     "label": "Edge GPU 持久缓存",
                 },
+                # Edge 的 GPU/WebGPU 着色缓存（glob 覆盖各 Profile 与系统级目录）
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
+                    "pattern": "*/GPUCache",
+                    "action": "clear",
+                    "label": "Edge GPU 缓存",
+                },
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
+                    "pattern": "*/DawnGraphiteCache",
+                    "action": "clear",
+                    "label": "Edge Dawn 缓存",
+                },
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
+                    "pattern": "*/DawnWebGPUCache",
+                    "action": "clear",
+                    "label": "Edge WebGPU 缓存",
+                },
                 # 其它常见浏览器缓存（跨机器通用，均只清缓存内容、保留目录）
                 {
                     "type": "glob_dirs",
@@ -251,6 +273,27 @@ def _builtin_specs() -> list[dict[str, Any]]:
                     "pattern": "*/Code Cache",
                     "action": "clear",
                     "label": "Chrome 代码缓存",
+                },
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
+                    "pattern": "*/GPUCache",
+                    "action": "clear",
+                    "label": "Chrome GPU 缓存",
+                },
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
+                    "pattern": "*/DawnGraphiteCache",
+                    "action": "clear",
+                    "label": "Chrome Dawn 缓存",
+                },
+                {
+                    "type": "glob_dirs",
+                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
+                    "pattern": "*/DawnWebGPUCache",
+                    "action": "clear",
+                    "label": "Chrome WebGPU 缓存",
                 },
                 {
                     "type": "glob_dirs",
@@ -288,6 +331,23 @@ def _builtin_specs() -> list[dict[str, Any]]:
                     "pattern": "installer*.exe",
                     "label": "完美世界更新安装包残留",
                 },
+                # Steam 平台自身的缓存/日志（htmlcache 归入 web_cache）
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "Steam", "appcache"),
+                    "label": "Steam 应用缓存",
+                },
+                {
+                    "type": "clear_dir",
+                    "path": os.path.join(_local(), "Steam", "logs"),
+                    "label": "Steam 日志",
+                },
+                {
+                    "type": "glob_files",
+                    "base": os.path.join(_local(), "Steam", "htmlcache"),
+                    "pattern": "*.log",
+                    "label": "Steam 网页缓存日志",
+                },
             ],
         },
         {
@@ -299,6 +359,11 @@ def _builtin_specs() -> list[dict[str, Any]]:
                 {"type": "clear_dir", "path": r"D:\.pnpm-store", "label": "D 盘 pnpm store"},
                 {"type": "clear_dir", "path": os.path.join(_local(), "pip", "cache"), "label": "pip 缓存"},
                 {"type": "clear_dir", "path": os.path.join(_local(), "npm-cache"), "label": "npm 缓存"},
+                {"type": "clear_dir", "path": os.path.join(_local(), "uv", "cache"), "label": "uv 缓存"},
+                {"type": "clear_dir", "path": os.path.join(_local(), "Yarn", "Cache"), "label": "yarn 缓存"},
+                {"type": "clear_dir", "path": os.path.join(_local(), "go-build"), "label": "Go 构建缓存"},
+                {"type": "clear_dir", "path": os.path.join(_user(), ".cargo", "registry"), "label": "cargo 依赖缓存"},
+                {"type": "clear_dir", "path": os.path.join(_temp(), "WinGet"), "label": "WinGet 临时安装包"},
                 {
                     "type": "find_dirs",
                     "bases": ["<CWD>"],

@@ -22,10 +22,13 @@ def config_path() -> Path:
 
 
 DEFAULTS: dict[str, Any] = {
-    "recycle_by_default": True,   # 默认是否删除到回收站（可恢复）
-    "protected_paths": [],        # 额外保护路径（子串匹配，大小写不敏感）
-    "custom_rules": [],           # 自定义清理规则
-    "dev_artifact_bases": [],     # find_dirs 的额外基目录（默认含当前工作目录）
+    "recycle_by_default": True,      # 默认是否删除到回收站（可恢复）
+    "recycle_error_fallback": False,  # 进回收站失败时是否回退为永久删除（默认否，更安全）
+    "protected_paths": [],           # 额外保护路径（子串匹配，大小写不敏感）
+    "custom_rules": [],              # 自定义清理规则
+    "dev_artifact_bases": [],        # find_dirs 的额外基目录（默认含当前工作目录）
+    "enabled_categories": [],        # 非空时只扫描这些分类（其余分类隐藏）
+    "preview_lines": 12,             # 每个分类预览时最多展示的目标行数
 }
 
 

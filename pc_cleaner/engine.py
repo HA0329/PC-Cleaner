@@ -4,6 +4,7 @@
 - 把一批 Target 执行删除，支持「进入回收站」或「永久删除」；
 - 目录目标按 action 处理：清空内容（保留目录）或删除整个目录；
 - 逐项容错：文件被占用/无权限时跳过并继续；
+- 删除前做二次防御：拒绝磁盘根路径与受保护路径（即使扫描器漏判）；
 - 清空 Windows 回收站（通过 shell32.SHEmptyRecycleBinW）；
 - 提供简单的进度回调。
 """
@@ -17,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
+from .config import load_config
 from .models import CleanMode, Target, TargetAction, TargetKind, format_size
 
 try:  # 可选依赖：删除到回收站
@@ -36,15 +38,28 @@ def recycle_available() -> bool:
 ProgressCB = Callable[[int, int, str], None]
 
 
-def _delete_path(path: Path, mode: CleanMode, is_dir: bool) -> None:
+def _guard_path(path: Path, is_protected) -> None:
+    """删除前的二次防御：拒绝磁盘根路径与受保护路径。"""
+    p = path.absolute()
+    if p == Path(p.anchor) or len(p.parts) <= 1:
+        raise PermissionError(f"拒绝删除磁盘根路径: {p}")
+    if is_protected(p):
+        raise PermissionError(f"受保护路径，拒绝删除: {p}")
+
+
+def _delete_path(
+    path: Path, mode: CleanMode, is_dir: bool, recycle_fallback: bool
+) -> None:
     """删除单个文件或目录。"""
     if mode is CleanMode.RECYCLE and HAS_SEND2TRASH:
         try:
             send2trash.send2trash(str(path))
             return
         except Exception:  # noqa: BLE001
-            # 进回收站失败则回退到永久删除（并告知调用方）
-            _delete_path(path, CleanMode.PERMANENT, is_dir)
+            if not recycle_fallback:
+                # 默认不回退：进回收站失败就保留原文件，避免误永久删除
+                raise
+            _delete_path(path, CleanMode.PERMANENT, is_dir, recycle_fallback)
             return
     # 永久删除
     if is_dir:
@@ -53,18 +68,23 @@ def _delete_path(path: Path, mode: CleanMode, is_dir: bool) -> None:
         os.remove(str(path))
 
 
-def _clear_dir_content(path: Path, mode: CleanMode, on_progress) -> None:
+def _clear_dir_content(
+    path: Path, mode: CleanMode, on_progress, recycle_fallback: bool, is_protected
+) -> None:
     """清空目录内容（保留目录本身）。"""
     for child in path.iterdir():
+        # 防御：清空时逐个跳过受保护子项（如缓存目录里混入的联接/用户数据）
+        if is_protected(child):
+            continue
         try:
             child_is_dir = child.is_dir()
         except OSError:
             continue
         try:
             if child_is_dir:
-                _delete_path(child, mode, is_dir=True)
+                _delete_path(child, mode, is_dir=True, recycle_fallback=recycle_fallback)
             else:
-                _delete_path(child, mode, is_dir=False)
+                _delete_path(child, mode, is_dir=False, recycle_fallback=recycle_fallback)
             on_progress(child)
         except (PermissionError, OSError):
             # 被占用或无权限，跳过
@@ -75,11 +95,20 @@ def delete_targets(
     targets: list[Target],
     mode: CleanMode,
     on_progress: ProgressCB | None = None,
+    recycle_fallback: bool | None = None,
 ) -> dict[str, int]:
     """执行删除。
 
     返回 ``{"deleted": n, "failed": n, "freed": bytes}``。
+
+    ``recycle_fallback``：进回收站失败时是否回退为永久删除。
+    ``None`` 时读取配置 ``recycle_error_fallback``（默认 False，即失败就保留）。
     """
+    if recycle_fallback is None:
+        recycle_fallback = bool(load_config().get("recycle_error_fallback", False))
+    from .scanner import make_protect_check  # 延迟导入，避免循环依赖
+
+    is_protected = make_protect_check()
     on_progress = on_progress or (lambda i, total, msg: None)
     total = len(targets)
     deleted = 0
@@ -87,16 +116,23 @@ def delete_targets(
     freed = 0
     for i, t in enumerate(targets, start=1):
         try:
+            _guard_path(t.path, is_protected)
             if t.kind is TargetKind.FILE:
-                _delete_path(t.path, mode, is_dir=False)
+                _delete_path(t.path, mode, is_dir=False, recycle_fallback=recycle_fallback)
                 freed += t.size
             elif t.action is TargetAction.CLEAR:
                 before = _dir_size_now(t.path)
-                _clear_dir_content(t.path, mode, lambda p: None)
+                _clear_dir_content(
+                    t.path,
+                    mode,
+                    lambda p: None,
+                    recycle_fallback=recycle_fallback,
+                    is_protected=is_protected,
+                )
                 after = _dir_size_now(t.path)
                 freed += max(before - after, 0)
             else:  # DELETE dir
-                _delete_path(t.path, mode, is_dir=True)
+                _delete_path(t.path, mode, is_dir=True, recycle_fallback=recycle_fallback)
                 freed += t.size
             deleted += 1
             on_progress(i, total, t.describe())

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -85,8 +86,10 @@ def _walk_dir(
             with os.scandir(path) as it:
                 for entry in it:
                     try:
-                        # 不跟随符号链接/联接，避免越界误删或造成指数级扫描
-                        is_link = entry.is_symlink()
+                        # 不跟随符号链接/联接（junction），避免越界误删或造成指数级扫描
+                        is_link = entry.is_symlink() or (
+                            hasattr(entry, "is_junction") and entry.is_junction()
+                        )
                         is_dir = entry.is_dir(follow_symlinks=False)
                     except OSError:
                         continue
@@ -220,6 +223,12 @@ def _scan_glob_files(spec: dict[str, Any], category_key: str, is_protected) -> l
     if not base.exists():
         return []
     pattern = spec.get("pattern", "*")
+    # 可选过滤：最小体积 + 足够老旧（与 files_by_rule 同语义，向后兼容）
+    import time
+
+    min_size_bytes = int(spec.get("min_size_mb", 0) or 0) * 1024 * 1024
+    older_than_secs = int(spec.get("older_than_days", 0) or 0) * 86400
+    now = time.time()
     targets: list[Target] = []
     try:
         matches = base.glob(pattern)
@@ -234,8 +243,10 @@ def _scan_glob_files(spec: dict[str, Any], category_key: str, is_protected) -> l
         if is_protected(m):
             continue
         try:
-            size = m.stat().st_size
+            st = m.stat()
         except OSError:
+            continue
+        if st.st_size < min_size_bytes or (now - st.st_mtime) < older_than_secs:
             continue
         targets.append(
             Target(
@@ -243,7 +254,7 @@ def _scan_glob_files(spec: dict[str, Any], category_key: str, is_protected) -> l
                 kind=TargetKind.FILE,
                 action=TargetAction.DELETE,
                 category=category_key,
-                size=size,
+                size=st.st_size,
                 file_count=1,
             )
         )
@@ -283,7 +294,11 @@ def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
     bases = _resolve_bases(spec)
     if not bases:
         return []
-    action = TargetAction.DELETE if spec.get("action", "delete") == "delete" else TargetAction.DELETE
+    action = (
+        TargetAction.CLEAR
+        if spec.get("action", "delete") == "clear"
+        else TargetAction.DELETE
+    )
     seen: set[str] = set()
     targets: list[Target] = []
     for base in bases:
@@ -390,30 +405,82 @@ def scan_spec(spec: dict[str, Any], is_protected=None) -> CategoryResult:
     return result
 
 
-def scan_all(specs: list[dict[str, Any]]) -> tuple[list[CategoryResult], None]:
-    """扫描所有分类（不含回收站），返回 (结果列表, None)。
+def scan_all(specs: list[dict[str, Any]]) -> list[CategoryResult]:
+    """扫描所有分类（不含回收站），返回结果列表。
 
     ``recycle_bin`` 由 CLI 特殊处理，不在此扫描。
+    跨分类做全局去重：同一路径出现在多个分类时只保留第一次出现的 Target。
     """
     is_protected = make_protect_check()
     results: list[CategoryResult] = []
+    seen_paths: set[str] = set()
     for spec in specs:
         if spec.get("key") == "recycle_bin":
             continue
-        results.append(scan_spec(spec, is_protected))
-    return results, None
+        res = scan_spec(spec, is_protected)
+        deduped: list[Target] = []
+        for t in res.targets:
+            key = normalize(t.path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            deduped.append(t)
+        res.targets = deduped
+        results.append(res)
+    return results
+
+
+def recycle_bin_size() -> int:
+    """估算回收站占用字节数（只读扫描各驱动器的 ``$Recycle.Bin``，不删除）。"""
+    if sys.platform != "win32":
+        return 0
+    total = 0
+    for drive in _system_drives():
+        root = Path(drive) / "$Recycle.Bin"
+        if not root.is_dir():
+            continue
+        try:
+            for child in root.rglob("*"):
+                try:
+                    if child.is_file() and not child.is_symlink():
+                        total += child.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return total
+
+
+def _system_drives() -> list[str]:
+    """返回本机存在的盘符根路径列表，如 ``["C:\\", "D:\\"]``。"""
+    import string
+
+    out: list[str] = []
+    for letter in string.ascii_uppercase:
+        drive = f"{letter}:\\"
+        try:
+            if os.path.exists(drive):
+                out.append(drive)
+        except OSError:
+            continue
+    return out
 
 
 def print_report(results: list[CategoryResult]) -> None:
     """人类可读的扫描结果输出。"""
+    from .console import green, pad_cjk
+
     total_ref = 0
     print("已扫描候选清理目标：")
     print("-" * 56)
     for res in results:
         if not res.scanned or not res.targets:
-            print(f"  {res.label:<12} (0 项)")
+            print(f"  {pad_cjk(res.label, 14)} (0 项)")
             continue
         total_ref += res.liberatable
-        print(f"  {res.label:<12} {res.total_count} 项, 可释放 {format_size(res.liberatable)}")
+        print(
+            f"  {green(pad_cjk(res.label, 14))} {res.total_count} 项, "
+            f"可释放 {green(format_size(res.liberatable))}"
+        )
     print("-" * 56)
-    print(f"  合计可释放: {format_size(total_ref)}")
+    print(f"  合计可释放: {green(format_size(total_ref))}")

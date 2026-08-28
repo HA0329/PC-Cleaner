@@ -115,10 +115,12 @@ def format_size(num: float) -> str:
     if num is None:
         return "?"
     num = float(num)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if num < 1024.0 or unit == "TB":
+    if num < 0:
+        return "?"  # 不应出现负体积，保守显示
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if num < 1024.0 or unit == "PB":
             if unit == "B":
                 return f"{int(num)} {unit}"
             return f"{num:.2f} {unit}"
         num /= 1024.0
-    return f"{num:.2f} TB"
+    return f"{num:.2f} PB"

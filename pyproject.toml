@@ -4,18 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pc-junk-cleaner"
-version = "0.1.0"
+version = "0.2.0"
 description = "为个人电脑定制的安全垃圾清理工具 (Windows 优先)"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "you" }]
 requires-python = ">=3.10"
-keywords = ["cleaner", "junk", "cache", "windows", "pc", "garbage"]
+keywords = ["cleaner", "junk", "cache", "windows", "pc", "garbage", "maintenance"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
 ]
 
 dependencies = []

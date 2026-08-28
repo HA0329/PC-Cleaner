@@ -206,6 +206,7 @@ pc-cleaner/
 ├── tests/               # 单元测试
 ├── pyproject.toml
 ├── README.md
+├── pc_cleaner.bat       # 一键扫描并清理   
 ├── CHANGELOG.md
 └── LICENSE
 ```

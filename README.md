@@ -293,7 +293,7 @@ pc-cleaner/
 ├── tests/               # 单元测试
 ├── pyproject.toml
 ├── README.md
-├── pc_cleaner.bat	#一键启动
+├── pc_cleaner.bat	     #一键启动
 ├── CHANGELOG.md
 └── LICENSE
 ```

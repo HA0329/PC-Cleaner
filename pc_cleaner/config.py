@@ -41,7 +41,7 @@ def audit_path() -> Path:
 
 
 DEFAULTS: dict[str, Any] = {
-    "recycle_by_default": True,      # 默认是否删除到回收站（可恢复）
+    "recycle_by_default": True,      # 默认是否删除到回收站
     "recycle_error_fallback": False,  # 进回收站失败时是否回退为永久删除（默认否，更安全）
     "protected_paths": [],           # 额外保护路径（子串匹配，大小写不敏感）
     "custom_rules": [],              # 自定义清理规则
@@ -50,6 +50,11 @@ DEFAULTS: dict[str, Any] = {
     "preview_lines": 12,             # 每个分类预览时最多展示的目标行数
     "show_risky": False,             # 交互菜单是否显示高风险分类（需 --risky 或设为 true）
     "enable_history": True,          # 是否记录清理历史与审计日志
+    "scan_depth": 20,                # find_dirs 遍历深度限制（默认 20 层）
+    "default_detail": False,         # 默认是否以详细模式显示扫描结果
+    "default_sort": "size_desc",     # 默认排序方式：size_desc/size_asc/name_asc/count_desc
+    "show_scan_progress": True,      # 扫描时是否显示进度提示
+    "compact_tree_view": False,      # 是否默认使用紧凑树形视图
 }
 
 

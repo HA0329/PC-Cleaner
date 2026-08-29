@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.5.0 (2026-08)
+
+### 核心改进：目录显示增强
+- **`--detail` / `-d` 详细展示模式**：完整展示每个分类下的所有目标目录/文件，不再截断；
+  交互菜单中可按 `d <编号>` 查看单个分类详情，或按 `d` 查看全部详情。
+- **`--tree` 树形视图**：以树形结构展示扫描结果，直观呈现目录层级关系。
+- **`--sort` 排序方式**：支持按体积（size_desc/size_asc）、名称（name_asc）、文件数（count_desc）排序。
+- **交互式菜单增强**：新增 `d`（详细）、`t`（树形）、`s`（切换排序）命令，
+  可在菜单中灵活切换查看方式，不再局限于摘要视图。
+- **汇总表格式优化**：交互式菜单的汇总信息改为表格展示，更清晰直观。
+
+### 扫描增强
+- **可配置扫描深度**：新增 `--max-depth` 参数和 `scan_depth` 配置项，
+  `find_dirs` 遍历深度从固定 12 层提升至默认 20 层，可按需调整。
+- **扫描进度提示**：扫描时实时显示进度条和当前分类，可通过 `--no-progress` 关闭。
+- **扫描耗时统计**：每个分类记录扫描耗时，方便性能分析。
+
+### 新功能
+- **`--export-scan PATH`**：将扫描结果导出为 JSON 文件，便于离线分析或存档。
+- **扫描进度显示类 `ScanProgressDisplay`**：自动检测 TTY，非终端环境自动静默。
+- **Target 新增 `label` 字段**：每个目标可携带规则标签，详细展示时显示更多信息。
+
+### 控制台增强（console.py）
+- 新增 `magenta`、`white`、`bg_red`、`bg_green`、`bg_yellow` 颜色函数。
+- 新增 `get_terminal_width()`、`reset_terminal_width()` 终端宽度检测。
+- 新增 `truncate_path()` 长路径智能截断（保留首尾）。
+- 新增 `progress_bar()` 文本进度条。
+- 新增 `separator()`、`box_header()`、`box_footer()` 格式化工具。
+- 新增 `format_table_row()` 表格行格式化。
+
+### 配置新增字段
+- `scan_depth`：find_dirs 遍历深度限制（默认 20）
+- `default_detail`：默认是否以详细模式显示（默认 false）
+- `default_sort`：默认排序方式（默认 size_desc）
+- `show_scan_progress`：扫描时是否显示进度（默认 true）
+- `compact_tree_view`：是否默认使用树形视图（默认 false）
+
 ## 0.4.0 (2026-04)
 
 ### 新功能（借鉴系统自带的经典 `clean.bat` 垃圾清理脚本）

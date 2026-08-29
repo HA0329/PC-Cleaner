@@ -7,6 +7,16 @@
 告诉你每个分类能释放多少空间、列出将删除的文件，**经你确认后**才动手。
 默认可以删除到回收站（可恢复），并且内置了受保护路径保护与删除前二次防御。
 
+v0.5 升级（目录显示增强 & 扫描优化）：
+
+- **`--detail` 详细展示**：完整展示每个分类下的所有目标目录/文件，不再截断；交互菜单中可按 `d` 查看单个或全部详情。
+- **`--tree` 树形视图**：以树形结构展示扫描结果，直观呈现目录层级关系。
+- **`--sort` 排序方式**：支持按体积、名称、文件数排序，交互菜单中可按 `s` 快速切换。
+- **可配置扫描深度**：新增 `--max-depth` 参数和 `scan_depth` 配置项，`find_dirs` 默认深度从 12 提升至 20 层。
+- **扫描进度提示**：扫描时实时显示进度条，可通过 `--no-progress` 关闭。
+- **`--export-scan`**：将扫描结果导出为 JSON 文件，便于离线分析或存档。
+- **交互式菜单增强**：新增 `d`（详细）、`t`（树形）、`s`（切换排序）命令，汇总表格式优化。
+
 v0.4 升级（借鉴系统自带的经典 `clean.bat` 垃圾清理脚本）：
 
 - **补齐系统 Temp**：新增清理 `C:\Windows\Temp`（之前只清用户 Temp），
@@ -167,16 +177,24 @@ pip install send2trash
 ## 🖥 命令行用法
 
 ```
-python -m pc_cleaner [--list] [--clean 分类名] [--all] [--exclude 分类名]
+python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 排序方式]
+                     [--max-depth 深度] [--export-scan PATH] [--no-progress]
+                     [--clean 分类名] [--all] [--exclude 分类名]
                      [--dry-run] [--recycle|--permanent] [--recycle-fallback]
-                     [--json] [--yes] [--risky] [--shred] [--checkup]
+                     [--json] [--yes|-y] [--risky] [--shred] [--checkup]
                      [--history] [--undo-last] [--admin]
                      [--export-config PATH] [--import-config PATH] [--show-config]
 ```
 
 | 参数 | 说明 |
 | --- | --- |
-| `--list` | 仅扫描，列出各分类的占用与可清理体积、磁盘可用、回收站占用，不删除 |
+| `--list` / `-l` | 仅扫描，列出各分类的占用与可清理体积、磁盘可用、回收站占用，不删除 |
+| `--detail` / `-d` | 详细展示每个分类下的所有目标目录/文件（不截断） |
+| `--tree` | 以树形视图展示扫描结果 |
+| `--sort 方式` | 排序方式：`size_desc`(默认) / `size_asc` / `name_asc` / `count_desc` |
+| `--max-depth 深度` | find_dirs 遍历深度限制（默认 20） |
+| `--export-scan PATH` | 将扫描结果导出为 JSON 文件 |
+| `--no-progress` | 不显示扫描进度条 |
 | `--clean 分类` | 直接清理指定分类（如 `web_cache,system_temp`，用逗号分隔多个） |
 | `--all` | 选中所有**非高风险**分类（含回收站）；高风险需另加 `--risky` |
 | `--exclude 分类` | 与 `--all`/`--clean` 联用：排除指定分类 |
@@ -193,7 +211,7 @@ python -m pc_cleaner [--list] [--clean 分类名] [--all] [--exclude 分类名]
 | `--export-config PATH` | 把当前配置导出到 JSON 文件 |
 | `--import-config PATH` | 从 JSON 文件导入配置 |
 | `--json` | 以 JSON 输出结果；**默认只扫描**，真正删除需配合 `--yes` |
-| `--yes` | 跳过交互确认（谨慎使用；删除方式仍由 `--recycle`/`--permanent`/配置决定） |
+| `--yes` / `-y` | 跳过交互确认（谨慎使用；删除方式仍由 `--recycle`/`--permanent`/配置决定） |
 | `--show-config` | 显示当前配置文件的路径与内容 |
 | `--version` | 显示版本 |
 
@@ -269,6 +287,11 @@ python -m pc_cleaner --clean system_admin --recycle --admin
 | `preview_lines` | 每个分类预览最多展示的行数 | `12` |
 | `show_risky` | 交互菜单是否显示高风险分类 | `false` |
 | `enable_history` | 是否记录清理历史与审计日志 | `true` |
+| `scan_depth` | find_dirs 遍历深度限制 | `20` |
+| `default_detail` | 默认是否以详细模式显示扫描结果 | `false` |
+| `default_sort` | 默认排序方式（size_desc/size_asc/name_asc/count_desc） | `size_desc` |
+| `show_scan_progress` | 扫描时是否显示进度条 | `true` |
+| `compact_tree_view` | 是否默认使用树形视图 | `false` |
 
 首次运行后用 `--show-config` 查看，或手动编辑该文件；
 多台机器同步配置用 `--export-config` / `--import-config`。
@@ -293,7 +316,7 @@ pc-cleaner/
 ├── tests/               # 单元测试
 ├── pyproject.toml
 ├── README.md
-├── pc_cleaner.bat	     #一键启动
+├── pc_cleaner.bat	#一键启动
 ├── CHANGELOG.md
 └── LICENSE
 ```

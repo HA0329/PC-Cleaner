@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .models import CategoryResult, Target, TargetAction, TargetKind, format_size
 from .rules import (
@@ -24,6 +25,9 @@ from .rules import (
     is_within_clear_root,
     spec_requires_admin,
 )
+
+# 扫描进度回调类型
+ScanProgressCB = Callable[[str, int, int], None]  # (category_label, current_spec, total_specs)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +165,7 @@ def _scan_clear_dir(
     size, count = _dir_size(base, is_protected)
     if size == 0 and count == 0:
         return []
+    label = spec.get("label", "")
     return [
         Target(
             path=base,
@@ -169,6 +174,7 @@ def _scan_clear_dir(
             category=category_key,
             size=size,
             file_count=count,
+            label=label,
         )
     ]
 
@@ -182,6 +188,7 @@ def _scan_delete_dir(
     if is_protected(base):
         return []
     size, count = _dir_size(base, is_protected)
+    label = spec.get("label", "")
     return [
         Target(
             path=base,
@@ -190,6 +197,7 @@ def _scan_delete_dir(
             category=category_key,
             size=size,
             file_count=count,
+            label=label,
         )
     ]
 
@@ -203,6 +211,7 @@ def _scan_glob_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
         return []
     pattern = spec.get("pattern", "*")
     action = spec.get("action", "clear")
+    label = spec.get("label", "")
     targets: list[Target] = []
     try:
         matches = base.glob(pattern)
@@ -228,6 +237,7 @@ def _scan_glob_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
                 category=category_key,
                 size=size,
                 file_count=count,
+                label=label,
             )
         )
     return targets
@@ -241,9 +251,8 @@ def _scan_glob_files(spec: dict[str, Any], category_key: str, is_protected) -> l
     if not base.exists():
         return []
     pattern = spec.get("pattern", "*")
+    label = spec.get("label", "")
     # 可选过滤：最小体积 + 足够老旧（与 files_by_rule 同语义，向后兼容）
-    import time
-
     min_size_bytes = int(spec.get("min_size_mb", 0) or 0) * 1024 * 1024
     older_than_secs = int(spec.get("older_than_days", 0) or 0) * 86400
     now = time.time()
@@ -274,6 +283,7 @@ def _scan_glob_files(spec: dict[str, Any], category_key: str, is_protected) -> l
                 category=category_key,
                 size=st.st_size,
                 file_count=1,
+                label=label,
             )
         )
     return targets
@@ -307,7 +317,7 @@ def _resolve_bases(spec: dict[str, Any]) -> list[Path]:
     return ordered
 
 
-def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected) -> list[Target]:
+def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected, max_depth: int = 20) -> list[Target]:
     names = {n.lower() for n in spec.get("names", [])}
     bases = _resolve_bases(spec)
     if not bases:
@@ -317,6 +327,7 @@ def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
         if spec.get("action", "delete") == "clear"
         else TargetAction.DELETE
     )
+    label = spec.get("label", "")
     seen: set[str] = set()
     targets: list[Target] = []
     for base in bases:
@@ -325,7 +336,7 @@ def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
         if is_protected(base):
             continue
         # 只遍历一层找到候选目录名；找到后不下降（它们本身就是待删目标）
-        for child, is_dir in _walk_dir(base, is_protected, max_depth=12, find_names=names):
+        for child, is_dir in _walk_dir(base, is_protected, max_depth=max_depth, find_names=names):
             if not is_dir:
                 continue
             if child.name.lower() in names:
@@ -342,6 +353,7 @@ def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
                         category=category_key,
                         size=size,
                         file_count=count,
+                        label=label,
                     )
                 )
     return targets
@@ -356,6 +368,7 @@ def _scan_files_by_rule(spec: dict[str, Any], category_key: str, is_protected) -
     base = expand_path(base_str)
     if not base.exists() or not base.is_dir():
         return []
+    label = spec.get("label", "")
     min_size_bytes = int(spec.get("min_size_mb", 0) or 0) * 1024 * 1024
     older_than_secs = int(spec.get("older_than_days", 0) or 0) * 86400
     now = time.time()
@@ -380,49 +393,75 @@ def _scan_files_by_rule(spec: dict[str, Any], category_key: str, is_protected) -
                 category=category_key,
                 size=st.st_size,
                 file_count=1,
+                label=label,
             )
         )
     return targets
 
 
-# target 类型 -> 处理函数
+# target 类型 -> 处理函数映射（find_dirs 特殊处理，支持 max_depth 参数）
 _TARGET_HANDLERS = {
     "clear_dir": _scan_clear_dir,
     "delete_dir": _scan_delete_dir,
     "glob_dirs": _scan_glob_dirs,
     "glob_files": _scan_glob_files,
-    "find_dirs": _scan_find_dirs,
     "files_by_rule": _scan_files_by_rule,
 }
 
 
-def scan_spec(spec: dict[str, Any], is_protected=None) -> CategoryResult:
+def scan_spec(
+    spec: dict[str, Any],
+    is_protected=None,
+    scan_depth: int = 20,
+    on_progress: ScanProgressCB | None = None,
+    progress_idx: int = 0,
+    progress_total: int = 0,
+) -> CategoryResult:
     """扫描单个分类规格，返回 CategoryResult。"""
     key = spec["key"]
+    label = spec.get("label") or category_label(key)
     if is_protected is None:
         is_protected = make_protect_check()
+
+    t0 = time.time()
+
     result = CategoryResult(
         key=key,
-        label=spec.get("label") or category_label(key),
+        label=label,
         risk=str(spec.get("risk") or "safe"),
         requires_admin=spec_requires_admin(spec),
     )
+
+    if on_progress:
+        on_progress(label, progress_idx, progress_total)
+
     # 需要管理员权限但当前未提权：跳过扫描并给出提示
     if result.requires_admin and not is_admin():
         result.admin_blocked = True
         result.scanned = True
+        result.scan_duration = time.time() - t0
         return result
+
     seen: set[str] = set()
     for target_spec in spec.get("targets", []):
         ttype = target_spec.get("type")
-        handler = _TARGET_HANDLERS.get(ttype)
-        if handler is None:
-            continue
-        try:
-            targets = handler(target_spec, key, is_protected)
-        except Exception:  # noqa: BLE001 单个 target 扫描失败不影响整体
-            result.skipped += 1
-            continue
+        # find_dirs 特殊处理，传入 max_depth
+        if ttype == "find_dirs":
+            handler = None  # 单独处理
+            try:
+                targets = _scan_find_dirs(target_spec, key, is_protected, max_depth=scan_depth)
+            except Exception:  # noqa: BLE001
+                result.skipped += 1
+                continue
+        else:
+            handler = _TARGET_HANDLERS.get(ttype)
+            if handler is None:
+                continue
+            try:
+                targets = handler(target_spec, key, is_protected)
+            except Exception:  # noqa: BLE001 单个 target 扫描失败不影响整体
+                result.skipped += 1
+                continue
         for t in targets:
             tpath = normalize(t.path)
             if tpath in seen:
@@ -430,22 +469,36 @@ def scan_spec(spec: dict[str, Any], is_protected=None) -> CategoryResult:
             seen.add(tpath)
             result.targets.append(t)
     result.scanned = True
+    result.scan_duration = time.time() - t0
     return result
 
 
-def scan_all(specs: list[dict[str, Any]]) -> list[CategoryResult]:
+def scan_all(
+    specs: list[dict[str, Any]],
+    scan_depth: int = 20,
+    on_progress: ScanProgressCB | None = None,
+) -> list[CategoryResult]:
     """扫描所有分类（不含回收站），返回结果列表。
 
     ``recycle_bin`` 由 CLI 特殊处理，不在此扫描。
     跨分类做全局去重：同一路径出现在多个分类时只保留第一次出现的 Target。
+    ``scan_depth``：find_dirs 遍历深度限制（默认 20 层）。
+    ``on_progress``：扫描进度回调 (category_label, current_idx, total)。
     """
     is_protected = make_protect_check()
     results: list[CategoryResult] = []
     seen_paths: set[str] = set()
-    for spec in specs:
+    total = len(specs)
+    for idx, spec in enumerate(specs, start=1):
         if spec.get("key") == "recycle_bin":
             continue
-        res = scan_spec(spec, is_protected)
+        res = scan_spec(
+            spec, is_protected,
+            scan_depth=scan_depth,
+            on_progress=on_progress,
+            progress_idx=idx,
+            progress_total=total,
+        )
         deduped: list[Target] = []
         for t in res.targets:
             key = normalize(t.path)
@@ -494,8 +547,11 @@ def _system_drives() -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 输出报告
+# ---------------------------------------------------------------------------
 def print_report(results: list[CategoryResult]) -> None:
-    """人类可读的扫描结果输出。"""
+    """人类可读的扫描结果摘要输出（简略模式）。"""
     from .console import green, pad_cjk
 
     total_ref = 0
@@ -512,3 +568,137 @@ def print_report(results: list[CategoryResult]) -> None:
         )
     print("-" * 56)
     print(f"  合计可释放: {green(format_size(total_ref))}")
+
+
+def print_detail_report(
+    results: list[CategoryResult],
+    sort_by: str = "size_desc",
+    max_items: int = 0,
+) -> None:
+    """详细扫描结果输出，展示每个分类下的具体目标目录/文件。
+
+    sort_by: 'size_desc' | 'size_asc' | 'name_asc' | 'count_desc'
+    max_items: 每个分类最多展示条数，0 表示不限制
+    """
+    from .console import bold, cyan, dim, green, red, yellow, pad_cjk, separator
+
+    print("")
+    print(bold("╔══════════════════════════════════════════════════════════╗"))
+    print(bold("║              详细扫描结果（完整目录列表）                ║"))
+    print(bold("╚══════════════════════════════════════════════════════════╝"))
+    print("")
+
+    total_size = 0
+    total_count = 0
+    total_targets = 0
+
+    for res in results:
+        if not res.scanned:
+            continue
+
+        # 风险徽标
+        if res.risk == "safe":
+            badge = green("●")
+        elif res.risk == "moderate":
+            badge = yellow("●")
+        else:
+            badge = red("●")
+
+        admin_tag = yellow(" [需管理员]") if res.requires_admin else ""
+
+        if res.admin_blocked:
+            print(f"  {badge} {bold(res.label)}{admin_tag}")
+            print(f"    {yellow('⚠ 需管理员权限，已跳过扫描')}")
+            print("")
+            continue
+
+        if not res.targets:
+            print(f"  {badge} {bold(res.label)}{admin_tag}  (0 项)")
+            print("")
+            continue
+
+        targets = res.sorted_targets(sort_by)
+        if max_items > 0:
+            shown = targets[:max_items]
+            hidden_count = len(targets) - max_items
+        else:
+            shown = targets
+            hidden_count = 0
+
+        cat_size = res.liberatable
+        cat_count = res.total_count
+        total_size += cat_size
+        total_count += cat_count
+        total_targets += len(targets)
+
+        print(f"  {badge} {bold(res.label)}{admin_tag}")
+        print(f"    {dim(f'{len(targets)} 个目标, {cat_count} 个文件, 可释放 {green(format_size(cat_size))}')}")
+        print(f"    {dim('─' * 60)}")
+
+        for i, t in enumerate(shown, 1):
+            # 紧凑格式：序号 + 图标 + 路径 + 大小
+            icon = t.kind_icon
+            label_tag = f" {dim(f'({t.label})')}" if t.label else ""
+            action_tag = dim(f"[{t.action_label}]")
+
+            path_str = str(t.path)
+            size_str = t.display_size
+            count_str = f"{t.file_count} 文件" if t.kind is TargetKind.DIR else ""
+
+            if t.kind is TargetKind.DIR:
+                print(f"    {cyan(str(i).rjust(3))}. {icon} {path_str}{label_tag}")
+                print(f"         {action_tag} {count_str}, {green(size_str)}")
+            else:
+                print(f"    {cyan(str(i).rjust(3))}. {icon} {path_str}{label_tag}")
+                print(f"         {green(size_str)}")
+
+        if hidden_count > 0:
+            print(f"    {dim(f'... 以及另外 {hidden_count} 项（使用 --detail 查看更多或设置 preview_lines 调整）')}")
+
+        print("")
+
+    # 汇总
+    print(separator("═") if hasattr(separator, '__call__') else "=" * 60)
+    print(f"  {bold('合计')}：{total_targets} 个目标, {total_count} 个文件, 可释放 {green(format_size(total_size))}")
+    print(separator("═") if hasattr(separator, '__call__') else "=" * 60)
+
+
+def print_tree_report(results: list[CategoryResult]) -> None:
+    """以树形结构展示扫描结果。"""
+    from .console import bold, cyan, dim, green, red, yellow
+
+    print("")
+    print(bold("📁 扫描结果（树形视图）"))
+    print("")
+
+    total_size = 0
+
+    for res in results:
+        if not res.scanned or not res.targets:
+            continue
+
+        if res.risk == "safe":
+            badge = green("●")
+        elif res.risk == "moderate":
+            badge = yellow("●")
+        else:
+            badge = red("●")
+
+        cat_size = res.liberatable
+        total_size += cat_size
+
+        print(f"  {badge} {bold(res.label)} {dim(f'[{res.key}]')}")
+        print(f"  │  {dim(f'{len(res.targets)} 个目标, 可释放 {green(format_size(cat_size))}')}")
+
+        targets = res.sorted_targets("size_desc")
+        for i, t in enumerate(targets):
+            connector = "├──" if i < len(targets) - 1 else "└──"
+            label_tag = f" {dim(f'← {t.label}')}" if t.label else ""
+            print(f"  │  {connector} {t.kind_icon} {t.path.name}{label_tag}  {green(t.display_size)}")
+            if t.kind is TargetKind.DIR:
+                print(f"  │  {'│' if i < len(targets) - 1 else ' '}     {dim(f'{t.file_count} 文件, {t.action_label}')}")
+
+        print(f"  │")
+        print("")
+
+    print(f"  {bold(f'合计可释放: {green(format_size(total_size))}')}")

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments / package managers
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tooling
+.idea/
+.vscode/
+*.swp
+.pytest_vendor/
+
+# User/runtime config (never commit)
+config.json
+
+# OS noise
+Thumbs.db
+.DS_Store

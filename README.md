@@ -17,6 +17,15 @@ v0.5 升级（目录显示增强 & 扫描优化）：
 - **`--export-scan`**：将扫描结果导出为 JSON 文件，便于离线分析或存档。
 - **交互式菜单增强**：新增 `d`（详细）、`t`（树形）、`s`（切换排序）命令，汇总表格式优化。
 
+v0.6 升级（清理规则外置 & 高级清理模式）：
+
+- **`rules.json` 规则外置**：内置清理规则迁移到随包附带的 `pc_cleaner/rules.json`
+  （单一数据源），路径用环境变量占位符表达，可直接编辑、审阅与替换，无需改代码。
+- **`--deep` 深度扫描**：更大遍历深度 + 启用 `deep_only` 附加缓存规则（Service Worker /
+  DawnCache / Electron / Discord / Telegram / Windows 图标字体缓存等）。
+- **高级过滤**：`--ext` 按扩展名、`--min-size-mb` 按最小体积、`--older-than-days`
+  按最旧修改时间筛选清理目标；`--shred-passes N` 设置安全擦除遍数。
+
 v0.4 升级（借鉴系统自带的经典 `clean.bat` 垃圾清理脚本）：
 
 - **补齐系统 Temp**：新增清理 `C:\Windows\Temp`（之前只清用户 Temp），
@@ -178,11 +187,12 @@ pip install send2trash
 
 ```
 python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 排序方式]
-                     [--max-depth 深度] [--export-scan PATH] [--no-progress]
+                     [--max-depth 深度] [--deep|-D] [--export-scan PATH] [--no-progress]
                      [--clean 分类名] [--all] [--exclude 分类名]
                      [--dry-run] [--recycle|--permanent] [--recycle-fallback]
-                     [--json] [--yes|-y] [--risky] [--shred] [--checkup]
-                     [--history] [--undo-last] [--admin]
+                     [--ext 扩展名] [--min-size-mb MB] [--older-than-days 天数]
+                     [--json] [--yes|-y] [--risky] [--shred] [--shred-passes N]
+                     [--checkup] [--history] [--undo-last] [--admin]
                      [--export-config PATH] [--import-config PATH] [--show-config]
 ```
 
@@ -193,6 +203,7 @@ python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 排序方式]
 | `--tree` | 以树形视图展示扫描结果 |
 | `--sort 方式` | 排序方式：`size_desc`(默认) / `size_asc` / `name_asc` / `count_desc` |
 | `--max-depth 深度` | find_dirs 遍历深度限制（默认 20） |
+| `--deep` / `-D` | 深度扫描：更大遍历深度（50）+ 启用 `deep_only` 高级清理规则 |
 | `--export-scan PATH` | 将扫描结果导出为 JSON 文件 |
 | `--no-progress` | 不显示扫描进度条 |
 | `--clean 分类` | 直接清理指定分类（如 `web_cache,system_temp`，用逗号分隔多个） |
@@ -201,10 +212,14 @@ python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 排序方式]
 | `--dry-run` | 只预览，不真正删除（默认即预览确认） |
 | `--recycle` | 删除进回收站（若已安装 send2trash） |
 | `--permanent` | 永久删除（会先确认，默认需额外确认） |
-| `--shred` | 永久删除前随机覆写文件内容一遍（隐私增强） |
+| `--shred` | 永久删除前随机覆写文件内容（隐私增强） |
+| `--shred-passes N` | shred 覆写遍数（默认 1，上限 7，需配合 `--shred`） |
+| `--ext 扩展名` | 仅清理匹配扩展名的文件（如 `.log,.tmp,.bak`；目录目标不受影响） |
+| `--min-size-mb MB` | 全局最小体积过滤：只清理 >= 指定 MB 的目标 |
+| `--older-than-days 天数` | 全局最旧修改时间过滤：只清理 >= 指定天数的文件 |
 | `--recycle-fallback` | 进回收站失败时回退为永久删除（默认保留原文件并计入失败） |
 | `--risky` | 显示/允许高风险分类（下载旧文件、构建产物、浏览器隐私数据、Windows.old） |
-| `--checkup` | 一键体检：只读汇总管理员状态、磁盘可用、回收站、可清理分类 |
+| `--checkup` | 一键体检：只读汇总管理员状态、磁盘可用、回收站、可清理分类（配合 `--deep` 深度体检） |
 | `--history` | 显示清理历史（时间/模式/释放空间/分类） |
 | `--undo-last` | 把最近一次「进回收站」的清理从回收站恢复回来 |
 | `--admin` | 以管理员身份重新启动（UAC 提权）后再执行 |
@@ -213,6 +228,8 @@ python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 排序方式]
 | `--json` | 以 JSON 输出结果；**默认只扫描**，真正删除需配合 `--yes` |
 | `--yes` / `-y` | 跳过交互确认（谨慎使用；删除方式仍由 `--recycle`/`--permanent`/配置决定） |
 | `--show-config` | 显示当前配置文件的路径与内容 |
+| `--show-rules` | 展示 `rules.json` 内置清理规则（配合 `--deep` 显示深度规则） |
+| `--validate-rules` | 校验 `rules.json` 规则格式 |
 | `--version` | 显示版本 |
 
 > 管道输出（stdout 非终端）且命令为只读扫描时自动输出 JSON（借鉴 sifty），
@@ -246,6 +263,14 @@ python -m pc_cleaner --json --clean system_temp --yes --recycle
 
 # 需要管理员权限的清理：未提权时自动跳过，或先 --admin 提权
 python -m pc_cleaner --clean system_admin --recycle --admin
+
+# 高级清理：深度扫描 + 只清 .log/.tmp 文件 + 多遍安全擦除
+python -m pc_cleaner --clean system_temp --deep --ext .log,.tmp --permanent --shred --shred-passes 3
+
+# 查看 / 校验内置规则（rules.json）
+python -m pc_cleaner --show-rules
+python -m pc_cleaner --show-rules --deep
+python -m pc_cleaner --validate-rules
 ```
 
 ---
@@ -311,7 +336,8 @@ pc-cleaner/
 │   ├── engine.py        # 删除引擎（回收站/永久、二次防御、shred、白名单例外、回收站恢复）
 │   ├── history.py       # 清理历史 / 审计日志（--history / --undo-last）
 │   ├── models.py        # 数据结构
-│   ├── rules.py         # 分类规则/黑名单/白名单/风险分级（本机定制）
+│   ├── rules.py         # 分类规则加载/黑名单/白名单/风险分级（从 rules.json 读取）
+│   ├── rules.json       # 内置清理规则（单一数据源，含 deep_only 高级规则）
 │   └── scanner.py       # 安全扫描与体积计算（管理员感知）
 ├── tests/               # 单元测试
 ├── pyproject.toml

@@ -4,6 +4,9 @@
 集中命中真正堆积的缓存：GPU 着色器缓存、微信运行缓存、Edge/Steam 网页
 缓存、游戏平台更新包、pnpm 缓存、系统临时文件等。
 
+内置规则自 v0.6 起统一维护在随包附带的 ``rules.json`` 中（单一数据源），
+本模块负责加载并做安全过滤（deep_only 深度规则、自定义规则合并）。
+
 安全原则：
 - 只清理"明确的缓存/临时"目录；绝不触碰用户数据与正在使用的文件。
 - 微信：只清理 ``%APPDATA%\\Tencent\\xwechat`` 下的 xplugin / radium / log /
@@ -156,545 +159,53 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
 
 
 # ---------------------------------------------------------------------------
-# 路径辅助
+# 内置规则加载（rules.json 单一数据源）
 # ---------------------------------------------------------------------------
-def _user() -> str:
-    return os.path.expanduser("~")
+def _load_builtin_rules() -> list[dict[str, Any]]:
+    """从随包附带的 rules.json 加载内置清理规则（单一数据源）。
+
+    文件缺失或损坏时抛出 RuntimeError，让问题尽早暴露（而非静默降级为
+    「无可清理项」，造成"清理工具清不出东西"的假象）。
+    """
+    path = Path(__file__).with_name("rules.json")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"无法加载内置规则文件 {path}: {exc}") from exc
+    cats = data.get("categories")
+    if not isinstance(cats, list):
+        raise RuntimeError(f"内置规则文件 {path} 格式错误：缺少 categories 列表")
+    return [c for c in cats if isinstance(c, dict) and c.get("key")]
 
 
-def _local() -> str:
-    return os.environ.get("LOCALAPPDATA", os.path.join(_user(), "AppData", "Local"))
-
-
-def _appdata() -> str:
-    return os.environ.get("APPDATA", os.path.join(_user(), "AppData", "Roaming"))
-
-
-def _temp() -> str:
-    return os.environ.get("TEMP", os.path.join(_user(), "AppData", "Local", "Temp"))
-
-
-def _windir() -> str:
-    return os.environ.get("WINDIR", r"C:\Windows")
-
-
-def _builtin_specs() -> list[dict[str, Any]]:
-    """返回内置分类规格（不含回收站，回收站由 CLI 特殊处理）。"""
-    return [
-        {
-            "key": "system_temp",
-            "label": CATEGORY_META["system_temp"]["label"],
-            "risk": "safe",
-            "targets": [
-                {"type": "clear_dir", "path": _temp(), "label": "用户临时文件"},
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "CrashDumps"),
-                    "label": "崩溃转储缓存",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_local(), "Microsoft", "Windows", "Explorer"),
-                    "pattern": "thumbcache_*.db",
-                    "label": "缩略图缓存",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_local(), "Microsoft", "Windows", "Explorer"),
-                    "pattern": "iconcache_*.db",
-                    "label": "图标缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Microsoft", "Windows", "WebCache"),
-                    "label": "网页窗口缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Microsoft", "Windows", "WER"),
-                    "label": "Windows 错误报告",
-                },
-                # 最近文档/跳转列表（%APPDATA%\Microsoft\Windows\Recent）：
-                # 借鉴经典 clean.bat 的 "del %userprofile%\recent\*.*"，
-                # 用现代路径清空；只清"最近使用"记录，不影响文件本身。
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_appdata(), "Microsoft", "Windows", "Recent"),
-                    "label": "最近文档/跳转列表",
-                },
-            ],
-        },
-        {
-            "key": "gpu_caches",
-            "label": CATEGORY_META["gpu_caches"]["label"],
-            "risk": "safe",
-            "targets": [
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "NVIDIA", "DXCache"),
-                    "label": "NVIDIA DXCache",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "NVIDIA", "GLCache"),
-                    "label": "NVIDIA GLCache",
-                },
-                # AMD/Intel 着色器缓存，同样会自行重建
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "AMD", "DXCache"),
-                    "label": "AMD DXCache",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "AMD", "GLCache"),
-                    "label": "AMD GLCache",
-                },
-            ],
-        },
-        {
-            "key": "web_cache",
-            "label": CATEGORY_META["web_cache"]["label"],
-            "risk": "safe",
-            "targets": [
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
-                    "pattern": "*/Cache",
-                    "action": "clear",
-                    "label": "Edge 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
-                    "pattern": "*/Code Cache",
-                    "action": "clear",
-                    "label": "Edge 代码缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Steam", "htmlcache"),
-                    "label": "Steam 网页缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Microsoft", "Windows", "INetCache"),
-                    "label": "INetCache",
-                },
-                # Edge 顶层真正会自行重建的缓存，glob("*/Cache") 覆盖不到这些目录
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "component_crx_cache"),
-                    "label": "Edge 组件缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "extensions_crx_cache"),
-                    "label": "Edge 扩展缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "GrShaderCache"),
-                    "label": "Edge 着色器缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "ShaderCache"),
-                    "label": "Edge 常驻着色器缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Microsoft", "Edge", "User Data", "GPUPersistentCache"),
-                    "label": "Edge GPU 持久缓存",
-                },
-                # Edge 的 GPU/WebGPU 着色缓存（glob 覆盖各 Profile 与系统级目录）
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
-                    "pattern": "*/GPUCache",
-                    "action": "clear",
-                    "label": "Edge GPU 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
-                    "pattern": "*/DawnGraphiteCache",
-                    "action": "clear",
-                    "label": "Edge Dawn 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
-                    "pattern": "*/DawnWebGPUCache",
-                    "action": "clear",
-                    "label": "Edge WebGPU 缓存",
-                },
-                # 其它常见浏览器缓存（跨机器通用，均只清缓存内容、保留目录）
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
-                    "pattern": "*/Cache",
-                    "action": "clear",
-                    "label": "Chrome 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
-                    "pattern": "*/Code Cache",
-                    "action": "clear",
-                    "label": "Chrome 代码缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
-                    "pattern": "*/GPUCache",
-                    "action": "clear",
-                    "label": "Chrome GPU 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
-                    "pattern": "*/DawnGraphiteCache",
-                    "action": "clear",
-                    "label": "Chrome Dawn 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
-                    "pattern": "*/DawnWebGPUCache",
-                    "action": "clear",
-                    "label": "Chrome WebGPU 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Mozilla", "Firefox", "Profiles"),
-                    "pattern": "*/cache2",
-                    "action": "clear",
-                    "label": "Firefox 缓存",
-                },
-                # 其它 Chromium 系浏览器（Brave / Vivaldi / Opera）同样只清缓存目录
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "BraveSoftware", "Brave-Browser", "User Data"),
-                    "pattern": "*/Cache",
-                    "action": "clear",
-                    "label": "Brave 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "BraveSoftware", "Brave-Browser", "User Data"),
-                    "pattern": "*/GPUCache",
-                    "action": "clear",
-                    "label": "Brave GPU 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Vivaldi", "User Data"),
-                    "pattern": "*/Cache",
-                    "action": "clear",
-                    "label": "Vivaldi 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_local(), "Vivaldi", "User Data"),
-                    "pattern": "*/GPUCache",
-                    "action": "clear",
-                    "label": "Vivaldi GPU 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_appdata(), "Opera Software", "Opera Stable"),
-                    "pattern": "Cache",
-                    "action": "clear",
-                    "label": "Opera 缓存",
-                },
-                {
-                    "type": "glob_dirs",
-                    "base": os.path.join(_appdata(), "Opera Software", "Opera Stable"),
-                    "pattern": "GPUCache",
-                    "action": "clear",
-                    "label": "Opera GPU 缓存",
-                },
-            ],
-        },
-        {
-            "key": "wechat_cache",
-            "label": CATEGORY_META["wechat_cache"]["label"],
-            "risk": "safe",
-            # 只清运行缓存，绝不碰 WeixinShuju 数据
-            "targets": [
-                {"type": "clear_dir", "path": os.path.join(_appdata(), "Tencent", "xwechat", "xplugin"), "label": "微信 xplugin"},
-                {"type": "clear_dir", "path": os.path.join(_appdata(), "Tencent", "xwechat", "radium"), "label": "微信 radium"},
-                {"type": "clear_dir", "path": os.path.join(_appdata(), "Tencent", "xwechat", "log"), "label": "微信日志"},
-                {"type": "clear_dir", "path": os.path.join(_appdata(), "Tencent", "xwechat", "crashinfo"), "label": "微信崩溃报告"},
-            ],
-        },
-        {
-            "key": "game_caches",
-            "label": CATEGORY_META["game_caches"]["label"],
-            "risk": "moderate",
-            "targets": [
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "perfectworldarena-updater", "pending"),
-                    "label": "完美世界更新包缓存",
-                },
-                # 实测本机更新包缓存的残留不在 pending 子目录，而是根目录的 installer.exe（约 264MB）
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_local(), "perfectworldarena-updater"),
-                    "pattern": "installer*.exe",
-                    "label": "完美世界更新安装包残留",
-                },
-                # Steam 平台自身的缓存/日志（htmlcache 归入 web_cache）
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Steam", "appcache"),
-                    "label": "Steam 应用缓存",
-                },
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_local(), "Steam", "logs"),
-                    "label": "Steam 日志",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_local(), "Steam", "htmlcache"),
-                    "pattern": "*.log",
-                    "label": "Steam 网页缓存日志",
-                },
-            ],
-        },
-        {
-            "key": "dev_caches",
-            "label": CATEGORY_META["dev_caches"]["label"],
-            "risk": "moderate",
-            "targets": [
-                {"type": "clear_dir", "path": os.path.join(_local(), "pnpm-cache"), "label": "pnpm 缓存"},
-                {"type": "clear_dir", "path": os.path.join(_local(), "pnpm", "store"), "label": "pnpm store"},
-                {"type": "clear_dir", "path": r"D:\.pnpm-store", "label": "D 盘 pnpm store"},
-                {"type": "clear_dir", "path": os.path.join(_local(), "pip", "cache"), "label": "pip 缓存"},
-                {"type": "clear_dir", "path": os.path.join(_local(), "npm-cache"), "label": "npm 缓存"},
-                {"type": "clear_dir", "path": os.path.join(_local(), "uv", "cache"), "label": "uv 缓存"},
-                {"type": "clear_dir", "path": os.path.join(_local(), "Yarn", "Cache"), "label": "yarn 缓存"},
-                {"type": "clear_dir", "path": os.path.join(_local(), "go-build"), "label": "Go 构建缓存"},
-                {"type": "clear_dir", "path": os.path.join(_user(), "go", "pkg", "mod", "cache"), "label": "Go 模块缓存"},
-                {"type": "clear_dir", "path": os.path.join(_user(), ".cargo", "registry"), "label": "cargo 依赖缓存"},
-                {"type": "clear_dir", "path": os.path.join(_user(), ".gradle", "caches"), "label": "Gradle 缓存"},
-                {"type": "clear_dir", "path": os.path.join(_local(), "NuGet", "v3-cache"), "label": "NuGet 缓存"},
-                {"type": "clear_dir", "path": os.path.join(_temp(), "WinGet"), "label": "WinGet 临时安装包"},
-                {
-                    "type": "find_dirs",
-                    "bases": ["<CWD>"],
-                    # 只删必然可再生的纯缓存目录；不带 dist/build/node_modules 等通用名，避免误删
-                    "names": [
-                        "__pycache__",
-                        ".pytest_cache",
-                        ".mypy_cache",
-                        ".ruff_cache",
-                    ],
-                    "action": "delete",
-                    "label": "散落工具缓存",
-                },
-            ],
-        },
-        {
-            "key": "downloads",
-            "label": CATEGORY_META["downloads"]["label"],
-            "risk": "risky",
-            "targets": [
-                {
-                    "type": "files_by_rule",
-                    "base": os.path.join(_user(), "Downloads"),
-                    "min_size_mb": 100,
-                    "older_than_days": 180,
-                    "label": "下载的大/旧文件",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_user(), "Downloads"),
-                    "pattern": "*.exe",
-                    "min_size_mb": 1,
-                    "older_than_days": 30,
-                    "label": "下载的安装包(.exe)",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_user(), "Downloads"),
-                    "pattern": "*.msi",
-                    "min_size_mb": 1,
-                    "older_than_days": 30,
-                    "label": "下载的安装包(.msi)",
-                },
-            ],
-        },
-        # ------------------------------------------------------------------
-        # 需管理员权限的系统深度清理（默认折叠，未提权时自动跳过并提示）
-        # ------------------------------------------------------------------
-        {
-            "key": "system_admin",
-            "label": CATEGORY_META["system_admin"]["label"],
-            "risk": "moderate",
-            "require_admin": True,
-            "targets": [
-                # Windows 更新下载缓存：位于受保护前缀 SoftwareDistribution 之下，
-                # 通过 ALLOWED_CLEAR_ROOTS 白名单仅允许清空其 Download 内容。
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_windir(), "SoftwareDistribution", "Download"),
-                    "label": "Windows 更新缓存",
-                },
-                # 预读取文件：加速启动用，可安全重建
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_windir(), "Prefetch"),
-                    "label": "预读取(Prefetch)",
-                },
-                # 系统 Temp（%WINDIR%\Temp）：经典 clean.bat 的
-                # "rd %windir%\temp & md %windir%\temp"，经白名单清空例外实现，
-                # 只清内容、保留目录本身。
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_windir(), "Temp"),
-                    "label": "系统临时文件(Windows\\Temp)",
-                },
-                # chkdsk/磁盘扫描残留：卷根目录的 found.000/found.001 等目录，
-                # 里面是检出的文件碎片（.chk），纯垃圾，删除整个目录。
-                # 借鉴 clean.bat 的 "del /f /s /q %systemdrive%\*.chk"，但只针对
-                # found.* 目录本身，不做全盘递归，避免误删。
-                {
-                    "type": "glob_dirs",
-                    "base": Path(_windir()).anchor,
-                    "pattern": "found.*",
-                    "action": "delete",
-                    "label": "chkdsk 残留(found.*)",
-                },
-                # Windows 更新安装日志（KB*.log），清理后由系统重新生成
-                {
-                    "type": "glob_files",
-                    "base": _windir(),
-                    "pattern": "KB*.log",
-                    "label": "Windows 更新日志(KB*.log)",
-                },
-                # %WINDIR% 顶层的 .bak 备份残留（逐项容错，被占用/无权限自动跳过）
-                {
-                    "type": "glob_files",
-                    "base": _windir(),
-                    "pattern": "*.bak",
-                    "label": "Windows 备份残留(*.bak)",
-                },
-                # Windows 更新诊断日志（.etl 跟踪文件），系统会自动重建
-                {
-                    "type": "clear_dir",
-                    "path": os.path.join(_windir(), "Logs", "WindowsUpdate"),
-                    "label": "Windows 更新诊断日志",
-                },
-                # 事件日志归档（Archive-*.evtx）：活跃日志不受影响
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_windir(), "System32", "winevt", "Logs"),
-                    "pattern": "Archive-*.evtx",
-                    "label": "事件日志归档",
-                },
-                # 系统级崩溃转储（内核 minidump）
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_windir(), "Minidump"),
-                    "pattern": "*.dmp",
-                    "label": "系统崩溃转储",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_windir(), "LiveKernelReports"),
-                    "pattern": "**/*.dmp",
-                    "label": "Live 内核报告",
-                },
-            ],
-        },
-        # ------------------------------------------------------------------
-        # 高风险、默认隐藏的可选清理（需 --risky 或配置 show_risky）
-        # ------------------------------------------------------------------
-        {
-            "key": "windows_old",
-            "label": CATEGORY_META["windows_old"]["label"],
-            "risk": "risky",
-            "require_admin": True,
-            "targets": [
-                {
-                    "type": "delete_dir",
-                    "path": os.path.join(Path(_windir()).anchor, "Windows.old"),
-                    "label": "Windows.old 残留",
-                },
-            ],
-        },
-        {
-            "key": "dev_purge",
-            "label": CATEGORY_META["dev_purge"]["label"],
-            "risk": "risky",
-            "targets": [
-                {
-                    "type": "find_dirs",
-                    "bases": ["<CWD>"],
-                    "names": [
-                        "node_modules",
-                        "dist",
-                        "build",
-                        "target",
-                        ".next",
-                        ".nuxt",
-                        ".output",
-                        "coverage",
-                    ],
-                    "action": "delete",
-                    "label": "散落构建产物",
-                },
-            ],
-        },
-        {
-            "key": "browser_privacy",
-            "label": CATEGORY_META["browser_privacy"]["label"],
-            "risk": "risky",
-            "targets": [
-                # 明确警告：会退出浏览器登录态。仅显式开启时清理。
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
-                    "pattern": "*/Cookies",
-                    "label": "Edge Cookie",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_local(), "Microsoft", "Edge", "User Data"),
-                    "pattern": "*/History",
-                    "label": "Edge 浏览历史",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
-                    "pattern": "*/Cookies",
-                    "label": "Chrome Cookie",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_local(), "Google", "Chrome", "User Data"),
-                    "pattern": "*/History",
-                    "label": "Chrome 浏览历史",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_appdata(), "Mozilla", "Firefox", "Profiles"),
-                    "pattern": "*/cookies.sqlite",
-                    "label": "Firefox Cookie",
-                },
-                {
-                    "type": "glob_files",
-                    "base": os.path.join(_appdata(), "Mozilla", "Firefox", "Profiles"),
-                    "pattern": "*/places.sqlite",
-                    "label": "Firefox 浏览历史",
-                },
-            ],
-        },
+def _filter_targets(spec: dict[str, Any], deep: bool) -> dict[str, Any]:
+    """按 deep 模式过滤目标：非 deep 模式下剔除 ``deep_only`` 规则。"""
+    if deep:
+        return spec
+    targets = [
+        t
+        for t in spec.get("targets", [])
+        if isinstance(t, dict) and not t.get("deep_only")
     ]
+    spec = dict(spec)
+    spec["targets"] = targets
+    return spec
+
+
+def _builtin_specs(deep: bool = False) -> list[dict[str, Any]]:
+    """返回内置分类规格（不含回收站，回收站由 CLI 特殊处理）。
+
+    ``deep=True`` 时额外包含 ``deep_only`` 深度清理规则（更彻底、更慢）。
+    """
+    cats = _load_builtin_rules()
+    out: list[dict[str, Any]] = []
+    for cat in cats:
+        filtered = _filter_targets(cat, deep)
+        # 非 deep 模式下，纯 deep_only 分类（无普通目标）直接跳过
+        if not deep and cat.get("deep_only") and not filtered["targets"]:
+            continue
+        out.append(filtered)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -713,13 +224,19 @@ def _load_custom_rules() -> list[dict[str, Any]]:
     return raw if isinstance(raw, list) else []
 
 
-def get_all_category_specs(merge_custom: bool = True) -> list[dict[str, Any]]:
-    """返回内置分类规格，可选合并配置文件中的自定义规则。"""
-    specs = _builtin_specs()
+def get_all_category_specs(
+    merge_custom: bool = True, deep: bool = False
+) -> list[dict[str, Any]]:
+    """返回内置分类规格，可选合并配置文件中的自定义规则。
+
+    ``deep=True`` 时包含 deep_only 深度清理规则。
+    """
+    specs = _builtin_specs(deep=deep)
     if merge_custom:
         for custom in _load_custom_rules():
             if not isinstance(custom, dict) or not custom.get("key"):
                 continue
+            custom = _filter_targets(custom, deep)
             existing = next((s for s in specs if s.get("key") == custom["key"]), None)
             if existing:
                 existing.setdefault("targets", []).extend(custom.get("targets", []))
@@ -759,3 +276,76 @@ def get_protected_patterns(include_user: bool = True) -> list[str]:
         user = (load_config().get("protected_paths") or []) or []
         patterns.extend(str(p) for p in user)
     return patterns
+
+
+# ---------------------------------------------------------------------------
+# 规则校验（--validate-rules）
+# ---------------------------------------------------------------------------
+#: 合法的风险等级
+VALID_RISKS: set[str] = {"safe", "moderate", "risky"}
+#: 合法的 target 类型
+VALID_TARGET_TYPES: set[str] = {
+    "clear_dir",
+    "delete_dir",
+    "glob_dirs",
+    "glob_files",
+    "files_by_rule",
+    "find_dirs",
+}
+#: 合法的目录动作
+VALID_ACTIONS: set[str] = {"clear", "delete"}
+
+
+def validate_rules(specs: list[dict[str, Any]] | None = None) -> list[str]:
+    """校验规则列表，返回错误信息列表（空列表表示全部通过）。
+
+    覆盖：分类 key 重复/缺失、非法 risk、缺 label、非法 target 类型、
+    各类型必需的字段（path/base/bases/names）、非法 action。
+    """
+    specs = specs if specs is not None else _builtin_specs(deep=True)
+    errors: list[str] = []
+    keys_seen: set[str] = set()
+    for i, cat in enumerate(specs, start=1):
+        if not isinstance(cat, dict):
+            errors.append(f"分类 #{i} 不是对象")
+            continue
+        key = cat.get("key")
+        if not isinstance(key, str) or not key:
+            errors.append(f"分类 #{i} 缺少字符串 key")
+            continue
+        if key in keys_seen:
+            errors.append(f"分类 key 重复: {key}")
+        keys_seen.add(key)
+
+        risk = cat.get("risk", "safe")
+        if risk not in VALID_RISKS:
+            errors.append(f"[{key}] 非法 risk: {risk!r}（应为 safe/moderate/risky）")
+        if not cat.get("label"):
+            errors.append(f"[{key}] 缺少 label")
+
+        targets = cat.get("targets", [])
+        if not isinstance(targets, list) or not targets:
+            errors.append(f"[{key}] targets 为空或非列表")
+            continue
+        for j, t in enumerate(targets, start=1):
+            loc = f"[{key}] targets[{j}]"
+            if not isinstance(t, dict):
+                errors.append(f"{loc} 不是对象")
+                continue
+            ttype = t.get("type")
+            if ttype not in VALID_TARGET_TYPES:
+                errors.append(f"{loc} 非法 type: {ttype!r}")
+                continue
+            if ttype in ("clear_dir", "delete_dir") and not t.get("path"):
+                errors.append(f"{loc} 缺少 path")
+            if ttype in ("glob_dirs", "glob_files", "files_by_rule") and not t.get("base"):
+                errors.append(f"{loc} 缺少 base")
+            if ttype == "find_dirs":
+                if not t.get("bases"):
+                    errors.append(f"{loc} 缺少 bases")
+                if not t.get("names"):
+                    errors.append(f"{loc} 缺少 names")
+            action = t.get("action")
+            if action is not None and action not in VALID_ACTIONS:
+                errors.append(f"{loc} 非法 action: {action!r}")
+    return errors

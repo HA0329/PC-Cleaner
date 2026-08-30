@@ -57,20 +57,26 @@ def _guard_path(path: Path, is_protected, action: TargetAction) -> None:
         raise PermissionError(f"受保护路径，拒绝删除: {p}")
 
 
-def _shred_file(path: Path) -> None:
-    """单遍随机覆写后删除（隐私：降低被恢复概率）。
+def _shred_file(path: Path, passes: int = 1) -> None:
+    """多遍随机覆写后删除（隐私：降低被恢复概率）。
 
-    失败时不阻断删除（擦除只是增强项）；覆盖内容失败也继续删除。
+    ``passes`` 为覆写遍数（默认 1，上限 7）。失败时不阻断删除
+    （擦除只是增强项）；覆盖内容失败也继续删除。
     """
+    if passes < 1:
+        passes = 1
+    passes = min(passes, 7)
     try:
         size = path.stat().st_size
         with path.open("r+b", buffering=0) as f:
-            remaining = size
-            chunk = 1024 * 1024
-            while remaining > 0:
-                n = min(chunk, remaining)
-                f.write(os.urandom(n))
-                remaining -= n
+            for _ in range(passes):
+                f.seek(0)
+                remaining = size
+                chunk = 1024 * 1024
+                while remaining > 0:
+                    n = min(chunk, remaining)
+                    f.write(os.urandom(n))
+                    remaining -= n
             f.flush()
             try:
                 os.fsync(f.fileno())
@@ -86,6 +92,7 @@ def _delete_path(
     is_dir: bool,
     recycle_fallback: bool,
     shred: bool = False,
+    shred_passes: int = 1,
 ) -> None:
     """删除单个文件或目录。"""
     if mode is CleanMode.RECYCLE and HAS_SEND2TRASH:
@@ -96,7 +103,14 @@ def _delete_path(
             if not recycle_fallback:
                 # 默认不回退：进回收站失败就保留原文件，避免误永久删除
                 raise
-            _delete_path(path, CleanMode.PERMANENT, is_dir, recycle_fallback, shred=shred)
+            _delete_path(
+                path,
+                CleanMode.PERMANENT,
+                is_dir,
+                recycle_fallback,
+                shred=shred,
+                shred_passes=shred_passes,
+            )
             return
     # 永久删除
     if is_dir:
@@ -104,13 +118,13 @@ def _delete_path(
             for child in path.rglob("*"):
                 try:
                     if child.is_file() and not child.is_symlink():
-                        _shred_file(child)
+                        _shred_file(child, passes=shred_passes)
                 except OSError:
                     continue
         shutil.rmtree(str(path), ignore_errors=False)
     else:
         if shred:
-            _shred_file(path)
+            _shred_file(path, passes=shred_passes)
         os.remove(str(path))
 
 
@@ -121,6 +135,7 @@ def _clear_dir_content(
     recycle_fallback: bool,
     is_protected,
     shred: bool = False,
+    shred_passes: int = 1,
 ) -> None:
     """清空目录内容（保留目录本身）。"""
     for child in path.iterdir():
@@ -134,11 +149,21 @@ def _clear_dir_content(
         try:
             if child_is_dir:
                 _delete_path(
-                    child, mode, is_dir=True, recycle_fallback=recycle_fallback, shred=shred
+                    child,
+                    mode,
+                    is_dir=True,
+                    recycle_fallback=recycle_fallback,
+                    shred=shred,
+                    shred_passes=shred_passes,
                 )
             else:
                 _delete_path(
-                    child, mode, is_dir=False, recycle_fallback=recycle_fallback, shred=shred
+                    child,
+                    mode,
+                    is_dir=False,
+                    recycle_fallback=recycle_fallback,
+                    shred=shred,
+                    shred_passes=shred_passes,
                 )
             on_progress(child)
         except (PermissionError, OSError):
@@ -152,6 +177,7 @@ def delete_targets(
     on_progress: ProgressCB | None = None,
     recycle_fallback: bool | None = None,
     shred: bool = False,
+    shred_passes: int = 1,
     audit: Callable[[Path, int, str], None] | None = None,
 ) -> dict[str, int]:
     """执行删除。
@@ -161,7 +187,9 @@ def delete_targets(
     ``recycle_fallback``：进回收站失败时是否回退为永久删除。
     ``None`` 时读取配置 ``recycle_error_fallback``（默认 False，即失败就保留）。
 
-    ``shred``：永久删除前先随机覆写一遍（隐私增强，仅对文件内容生效）。
+    ``shred``：永久删除前先随机覆写（隐私增强，仅对文件内容生效）。
+
+    ``shred_passes``：覆写遍数（默认 1，上限 7），仅 ``shred=True`` 时生效。
 
     ``audit``：每成功删除一个目标时回调 ``(path, size, mode)``，用于审计日志/历史。
     """
@@ -181,7 +209,12 @@ def delete_targets(
             _guard_path(t.path, is_protected, t.action)
             if t.kind is TargetKind.FILE:
                 _delete_path(
-                    t.path, mode, is_dir=False, recycle_fallback=recycle_fallback, shred=shred
+                    t.path,
+                    mode,
+                    is_dir=False,
+                    recycle_fallback=recycle_fallback,
+                    shred=shred,
+                    shred_passes=shred_passes,
                 )
                 freed += t.size
                 audit(t.path, t.size, mode.value)
@@ -194,13 +227,19 @@ def delete_targets(
                     recycle_fallback=recycle_fallback,
                     is_protected=is_protected,
                     shred=shred,
+                    shred_passes=shred_passes,
                 )
                 after = _dir_size_now(t.path)
                 freed += max(before - after, 0)
                 audit(t.path, t.size, mode.value)
             else:  # DELETE dir
                 _delete_path(
-                    t.path, mode, is_dir=True, recycle_fallback=recycle_fallback, shred=shred
+                    t.path,
+                    mode,
+                    is_dir=True,
+                    recycle_fallback=recycle_fallback,
+                    shred=shred,
+                    shred_passes=shred_passes,
                 )
                 freed += t.size
                 audit(t.path, t.size, mode.value)

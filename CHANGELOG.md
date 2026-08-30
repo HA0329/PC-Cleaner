@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.6.0 (2026-08)
+
+### 清理规则外置（单一数据源）
+- **`rules.json`**：内置清理规则从 `rules.py` 硬编码迁移到随包附带的
+  `pc_cleaner/rules.json`，路径统一用环境变量占位符（`%TEMP%` / `%LOCALAPPDATA%` /
+  `%APPDATA%` / `%WINDIR%` / `%USERPROFILE%` / `%SYSTEMDRIVE%`、`~`、`<CWD>`），
+  不再写死 Python 函数，便于直接编辑、审阅与替换。
+- 规则文件缺失/损坏时抛出清晰错误（而非静默"清不出东西"）。
+- `pyproject.toml` 新增 `[tool.setuptools.package-data]` 保证 `rules.json` 随包分发。
+
+### 高级清理模式
+- **`--deep` / `-D` 深度扫描**：遍历深度提升至 50（可被 `--max-depth` 覆盖），
+  并启用 `rules.json` 中标记 `deep_only` 的附加缓存规则（Service Worker 缓存、
+  DawnCache、Electron / Discord / Telegram 缓存、Windows 图标/字体缓存等）。
+- **`--ext EXT[,EXT...]`**：仅清理匹配扩展名的文件目标（目录目标不受影响），
+  例如 `--ext .log,.tmp,.bak`。
+- **`--min-size-mb MB`**：全局最小体积过滤，只清理 >= 指定 MB 的目标。
+- **`--older-than-days DAYS`**：全局最旧修改时间过滤，只清理 >= 指定天数的文件。
+- **`--shred-passes N`**：安全擦除遍数（默认 1，上限 7），配合 `--shred` 使用；
+  `_shred_file` 支持多遍随机覆写。
+
+### 规则查看与校验
+- **`--show-rules`**：可视化展示 `rules.json` 内置规则（分类、目标类型、路径、阈值、
+  风险、deep 标记）；配合 `--deep` 一并显示 deep_only 深度规则。
+- **`--validate-rules`**：校验 `rules.json` 格式（重复/缺失 key、非法 risk/type/action、
+  缺少必填字段），通过返回 0、有问题返回 1 并逐条列出。
+- **`--checkup` 接入 `--deep`**：体检报告头部显示扫描模式（标准/深度）与遍历深度，
+  深度模式下体检会包含 deep_only 规则并以更大深度扫描。
+
+### 其它
+- 版本号统一为 0.6.0；`get_all_category_specs` 新增 `deep` 参数（默认 False，向后兼容）。
+
 ## 0.5.0 (2026-08)
 
 ### 核心改进：目录显示增强

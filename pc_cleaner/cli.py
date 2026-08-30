@@ -15,6 +15,12 @@ v0.5 新增：
 - ``--export-scan`` 导出扫描结果到 JSON 文件
 - 扫描进度实时提示
 - 交互式菜单增强：查看详细列表、切换排序、切换树形视图
+
+v0.6 新增：
+- ``--deep`` 深度扫描（更大遍历深度 + 启用 deep_only 高级规则）
+- ``--ext`` / ``--min-size-mb`` / ``--older-than-days`` 高级清理过滤
+- ``--shred-passes`` 多遍安全擦除
+- ``--show-rules`` 展示 rules.json 规则、``--validate-rules`` 校验规则格式
 """
 
 from __future__ import annotations
@@ -47,7 +53,7 @@ from .history import (
     make_session,
     record_deletion_audit,
 )
-from .models import CategoryResult, format_size
+from .models import CategoryResult, TargetKind, format_size
 from .rules import (
     get_all_category_specs,
     is_risky_spec,
@@ -114,6 +120,71 @@ def _risk_badge(risk: str) -> str:
 
 def _admin_tag(requires_admin: bool) -> str:
     return yellow(" [需管理员]") if requires_admin else ""
+
+
+def _parse_ext_filter(raw: str | None) -> list[str] | None:
+    """把 ``--ext`` 的值解析成小写、带点号的扩展名列表。"""
+    if not raw:
+        return None
+    exts: list[str] = []
+    for e in raw.replace("，", ",").replace("；", ",").split(","):
+        e = e.strip().lower()
+        if not e:
+            continue
+        if not e.startswith("."):
+            e = "." + e
+        if e not in exts:
+            exts.append(e)
+    return exts or None
+
+
+def _apply_target_filters(
+    targets: list[Any],
+    *,
+    ext_filter: list[str] | None = None,
+    min_size_bytes: int | None = None,
+    older_than_secs: int | None = None,
+) -> list[Any]:
+    """高级清理过滤：按扩展名 / 最小体积 / 最旧修改时间筛选目标。
+
+    - 扩展名过滤只作用于文件目标（目录目标始终保留）；
+    - 最小体积作用于所有目标（目录按内部总字节数比较）；
+    - 最旧修改时间只作用于文件目标。
+    """
+    if not any((ext_filter, min_size_bytes, older_than_secs)):
+        return targets
+    now = time.time()
+    out: list[Any] = []
+    for t in targets:
+        is_dir = t.kind is TargetKind.DIR
+        if not is_dir and ext_filter and t.path.suffix.lower() not in ext_filter:
+            continue
+        if min_size_bytes is not None and t.size < min_size_bytes:
+            continue
+        if not is_dir and older_than_secs is not None:
+            try:
+                if (now - t.path.stat().st_mtime) < older_than_secs:
+                    continue
+            except OSError:
+                continue
+        out.append(t)
+    return out
+
+
+def _filters_from_args(args) -> tuple[list[str] | None, int | None, int | None, int]:
+    """从命令行参数解析出高级清理过滤参数。
+
+    返回 ``(ext_filter, min_size_bytes, older_than_secs, shred_passes)``。
+    """
+    ext_filter = _parse_ext_filter(getattr(args, "ext", None))
+    min_size_bytes = None
+    if getattr(args, "min_size_mb", None):
+        min_size_bytes = int(args.min_size_mb) * 1024 * 1024
+    older_than_secs = None
+    if getattr(args, "older_than_days", None):
+        older_than_secs = int(args.older_than_days) * 86400
+    shred_passes = int(getattr(args, "shred_passes", 1) or 1)
+    return ext_filter, min_size_bytes, older_than_secs, shred_passes
 
 
 # ---------------------------------------------------------------------------
@@ -427,9 +498,19 @@ def _run_clean_flow(
     cfg: dict[str, Any],
     recycle_fallback: bool = False,
     shred: bool = False,
+    shred_passes: int = 1,
+    ext_filter: list[str] | None = None,
+    min_size_bytes: int | None = None,
+    older_than_secs: int | None = None,
 ) -> dict[str, Any]:
     """对选中的分类执行：预览 -> 确认 -> 删除。"""
     targets = _collect_targets(selected)
+    targets = _apply_target_filters(
+        targets,
+        ext_filter=ext_filter,
+        min_size_bytes=min_size_bytes,
+        older_than_secs=older_than_secs,
+    )
     max_lines = int(cfg.get("preview_lines", 12) or 12)
     sort_by = cfg.get("default_sort", "size_desc")
 
@@ -445,7 +526,8 @@ def _run_clean_flow(
         _echo(f"  【回收站】将清空回收站（{red('不可恢复')}）。")
 
     if shred and not dry_run and mode is CleanMode.PERMANENT:
-        _echo(yellow("  shred 模式：永久删除前将随机覆写文件内容一遍。"))
+        passes = max(1, min(int(shred_passes or 1), 7))
+        _echo(yellow(f"  shred 模式：永久删除前将随机覆写文件内容 {passes} 遍。"))
 
     if dry_run:
         _echo("")
@@ -479,6 +561,7 @@ def _run_clean_flow(
             on_progress=_progress_line,
             recycle_fallback=recycle_fallback,
             shred=shred,
+            shred_passes=shred_passes,
             audit=audit_log,
         )
         result["deleted"] += res["deleted"]
@@ -564,6 +647,8 @@ def _build_parser() -> argparse.ArgumentParser:
                            default=None, help="排序方式（默认按体积从大到小）")
     scan_group.add_argument("--max-depth", type=int, default=None,
                            help="find_dirs 遍历深度限制（默认 20）")
+    scan_group.add_argument("--deep", "-D", action="store_true",
+                            help="深度扫描：更大遍历深度 + 启用 deep_only 高级清理规则")
     scan_group.add_argument("--export-scan", metavar="PATH",
                            help="将扫描结果导出为 JSON 文件")
     scan_group.add_argument("--no-progress", action="store_true",
@@ -591,6 +676,17 @@ def _build_parser() -> argparse.ArgumentParser:
     clean_group.add_argument("--shred", action="store_true",
                             help="永久删除前随机覆写文件内容一遍（隐私增强）")
 
+    # 高级清理（v0.6）
+    adv_group = p.add_argument_group("高级清理")
+    adv_group.add_argument("--ext", metavar="EXT[,EXT...]",
+                           help="仅清理匹配扩展名的文件（如 .log,.tmp,.bak；目录目标不受影响）")
+    adv_group.add_argument("--min-size-mb", type=int, default=None, metavar="MB",
+                           help="全局最小体积过滤：只清理 >= 指定 MB 的目标")
+    adv_group.add_argument("--older-than-days", type=int, default=None, metavar="DAYS",
+                           help="全局最旧修改时间过滤：只清理 >= 指定天数的文件")
+    adv_group.add_argument("--shred-passes", type=int, default=1, metavar="N",
+                           help="shred 覆写遍数（默认 1，上限 7，需配合 --shred）")
+
     # 历史与管理
     mgmt_group = p.add_argument_group("历史与管理")
     mgmt_group.add_argument("--history", action="store_true",
@@ -607,6 +703,10 @@ def _build_parser() -> argparse.ArgumentParser:
     cfg_group.add_argument("--export-config", metavar="PATH", help="导出配置到 JSON 文件")
     cfg_group.add_argument("--import-config", metavar="PATH", help="从 JSON 文件导入配置")
     cfg_group.add_argument("--show-config", action="store_true", help="显示当前配置")
+    cfg_group.add_argument("--show-rules", action="store_true",
+                           help="展示 rules.json 内置清理规则（配合 --deep 显示深度规则）")
+    cfg_group.add_argument("--validate-rules", action="store_true",
+                           help="校验 rules.json 规则格式")
     cfg_group.add_argument("--version", action="store_true", help="显示版本")
 
     p.set_defaults(mode=None)
@@ -677,12 +777,20 @@ def _cmd_undo_last() -> int:
     return 0
 
 
-def _cmd_checkup(specs: list[dict[str, Any]], show_risky: bool, scan_depth: int, show_progress: bool) -> int:
+def _cmd_checkup(
+    specs: list[dict[str, Any]],
+    show_risky: bool,
+    scan_depth: int,
+    show_progress: bool,
+    deep: bool = False,
+) -> int:
     """一键体检：只读汇总。"""
     from .scanner import _system_drives
     from .console import progress_bar
 
     _echo(bold(f"=== PC Junk Cleaner {__version__} 体检报告 ==="))
+    mode_tag = "深度 (deep)" if deep else "标准"
+    _echo(dim(f"  扫描模式: {mode_tag} · 遍历深度 {scan_depth} 层"))
     _echo("")
 
     # 系统信息
@@ -777,6 +885,81 @@ def _cmd_import_config(path: str) -> int:
     return 0
 
 
+def _cmd_show_rules(deep: bool = False) -> int:
+    """可视化展示 rules.json 中的内置清理规则。"""
+    from .rules import _builtin_specs
+
+    specs = _builtin_specs(deep=deep)
+    _echo("")
+    _echo(
+        bold(
+            f"内置清理规则（rules.json · {len(specs)} 个分类"
+            + (" · 深度模式" if deep else "")
+            + "）："
+        )
+    )
+    for cat in specs:
+        badge = _risk_badge(cat.get("risk", "safe"))
+        admin = yellow(" [需管理员]") if cat.get("require_admin") else ""
+        deep_tag = magenta(" [deep_only]") if cat.get("deep_only") else ""
+        _echo(
+            f"  {badge} {bold(cat.get('label', ''))}  "
+            f"{cyan(cat.get('key', ''))}{admin}{deep_tag}"
+        )
+        targets = cat.get("targets", [])
+        _echo(f"    {dim(f'{len(targets)} 个目标')}")
+        for t in targets:
+            ttype = t.get("type", "?")
+            label = t.get("label", "")
+            d_tag = magenta(" [deep]") if t.get("deep_only") else ""
+            loc = (
+                t.get("path")
+                or t.get("base")
+                or (", ".join(t.get("bases", [])) if t.get("bases") else "")
+                or "-"
+            )
+            extra = []
+            if t.get("pattern"):
+                extra.append(f"pattern={t.get('pattern')}")
+            if t.get("action"):
+                extra.append(f"action={t.get('action')}")
+            if t.get("min_size_mb") is not None:
+                extra.append(f"min_size_mb={t.get('min_size_mb')}")
+            if t.get("older_than_days") is not None:
+                extra.append(f"older_than_days={t.get('older_than_days')}")
+            if t.get("names"):
+                extra.append(f"names={','.join(t.get('names'))}")
+            suffix = f"  [{', '.join(extra)}]" if extra else ""
+            _echo(f"      - {dim(ttype)}{suffix}{d_tag}  {loc}  {dim(label)}")
+        _echo("")
+    _echo(dim("提示：直接编辑 pc_cleaner/rules.json 增删规则；改完用 --validate-rules 校验。"))
+    return 0
+
+
+def _cmd_validate_rules() -> int:
+    """校验 rules.json 规则格式。"""
+    from .rules import _builtin_specs, validate_rules
+
+    specs = _builtin_specs(deep=True)
+    errors = validate_rules(specs)
+    if errors:
+        _echo(red(f"规则校验失败：发现 {len(errors)} 个问题："))
+        for e in errors:
+            _echo(f"  {red('✗')} {e}")
+        return 1
+    total_targets = sum(len(c.get("targets", [])) for c in specs)
+    deep_only = sum(
+        1 for c in specs for t in c.get("targets", []) if t.get("deep_only")
+    )
+    _echo(
+        green(
+            f"✓ 规则校验通过：{len(specs)} 个分类，{total_targets} 个目标，"
+            f"其中 {deep_only} 个 deep_only。"
+        )
+    )
+    return 0
+
+
 def _cmd_export_scan(results: list[CategoryResult], path: str) -> int:
     """将扫描结果导出为 JSON 文件。"""
     data = {
@@ -858,6 +1041,11 @@ def main(argv: list[str] | None = None) -> int:
         _echo(json.dumps(load_config(), ensure_ascii=False, indent=2))
         return 0
 
+    if args.validate_rules:
+        return _cmd_validate_rules()
+    if args.show_rules:
+        return _cmd_show_rules(deep=args.deep)
+
     cfg = load_config()
 
     if args.export_config:
@@ -873,7 +1061,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.admin and not is_admin():
         return _relaunch_as_admin(argv if argv is not None else sys.argv[1:])
 
-    specs = get_all_category_specs(merge_custom=True)
+    specs = get_all_category_specs(merge_custom=True, deep=args.deep)
 
     # 配置可限制只扫描部分分类
     enabled = [k.lower() for k in (cfg.get("enabled_categories") or []) if k]
@@ -887,8 +1075,13 @@ def main(argv: list[str] | None = None) -> int:
     # 排序方式：命令行优先，其次配置
     sort_by = args.sort or cfg.get("default_sort", "size_desc")
 
-    # 扫描深度
+    # 扫描深度（--deep 模式使用更大深度，除非显式 --max-depth）
     scan_depth = args.max_depth if args.max_depth is not None else int(cfg.get("scan_depth", 20))
+    if args.deep and args.max_depth is None:
+        scan_depth = max(scan_depth, 50)
+
+    # 高级清理过滤参数
+    ext_filter, min_size_bytes, older_than_secs, shred_passes = _filters_from_args(args)
 
     # 是否显示进度
     show_progress = not args.no_progress and cfg.get("show_scan_progress", True)
@@ -911,7 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.checkup:
-        return _cmd_checkup(specs, show_risky, scan_depth, show_progress)
+        return _cmd_checkup(specs, show_risky, scan_depth, show_progress, deep=args.deep)
 
     # 全量扫描
     progress = ScanProgressDisplay(enabled=show_progress and not show_detail and not show_tree)
@@ -1009,6 +1202,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg=cfg,
         recycle_fallback=args.recycle_fallback or bool(cfg.get("recycle_error_fallback", False)),
         shred=args.shred,
+        shred_passes=shred_passes,
+        ext_filter=ext_filter,
+        min_size_bytes=min_size_bytes,
+        older_than_secs=older_than_secs,
     )
     return 0
 
@@ -1160,6 +1357,7 @@ def _interactive(
             _echo(yellow("  所选分类没有可清理的内容。"))
             continue
 
+        ext_filter, min_size_bytes, older_than_secs, shred_passes = _filters_from_args(args)
         _run_clean_flow(
             selected,
             dry_run=args.dry_run,
@@ -1169,6 +1367,10 @@ def _interactive(
             cfg=cfg,
             recycle_fallback=args.recycle_fallback or bool(cfg.get("recycle_error_fallback", False)),
             shred=args.shred,
+            shred_passes=shred_passes,
+            ext_filter=ext_filter,
+            min_size_bytes=min_size_bytes,
+            older_than_secs=older_than_secs,
         )
 
         # 循环：重新扫描并继续
@@ -1234,6 +1436,13 @@ def _json_stdout_mode(
         elif args.yes:
             selected = [r for r in results if r.key in keys and not r.admin_blocked]
             targets = _collect_targets(selected)
+            ext_filter, min_size_bytes, older_than_secs, shred_passes = _filters_from_args(args)
+            targets = _apply_target_filters(
+                targets,
+                ext_filter=ext_filter,
+                min_size_bytes=min_size_bytes,
+                older_than_secs=older_than_secs,
+            )
             res = delete_targets(
                 targets,
                 mode,
@@ -1241,6 +1450,7 @@ def _json_stdout_mode(
                 recycle_fallback=args.recycle_fallback
                 or bool(cfg.get("recycle_error_fallback", False)),
                 shred=args.shred,
+                shred_passes=shred_passes,
             )
             action: dict[str, Any] = {
                 "mode": mode.value,

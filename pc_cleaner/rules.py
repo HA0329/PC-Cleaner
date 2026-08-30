@@ -72,26 +72,49 @@ DEFAULT_SKIP_DIRNAMES: set[str] = {
 # ---------------------------------------------------------------------------
 # 受保护路径下的「白名单清空」例外
 # ---------------------------------------------------------------------------
-# 某些目录位于受保护前缀之下（如 C:\Windows\SoftwareDistribution 下的
+# 某些目录位于受保护前缀之下（如 %WINDIR%\SoftwareDistribution 下的
 # Download 更新缓存），但它们的*内容*是明确可安全重建的缓存。
-# 列入本集合的目录（规范化、小写、绝对路径）只允许以 CLEAR（清空内容）方式
-# 被内置规则清理；DELETE（删除目录本身）或任何非白名单路径仍会被二次防御拒绝。
+# 列入本集合的目录只允许以 CLEAR（清空内容）方式被内置规则清理；
+# DELETE（删除目录本身）或任何非白名单路径仍会被二次防御拒绝。
+#
+# 条目使用环境变量占位符（如 ``%WINDIR%``），在 ``is_within_clear_root``
+# 每次调用时动态解析为绝对路径 —— 因此与系统盘符解耦：系统盘不是 C:
+# 也能正确匹配（也兼容直接写绝对路径的旧式条目 / 测试注入）。
 ALLOWED_CLEAR_ROOTS: set[str] = {
-    r"c:\windows\softwaredistribution\download",
-    r"c:\windows\prefetch",
+    r"%WINDIR%\SoftwareDistribution\Download",
+    r"%WINDIR%\Prefetch",
     # 系统 Temp（%WINDIR%\Temp）：位于受保护前缀 windows\temp 之下，
     # 但内容是可安全重建的临时文件；只允许清空，删除目录本身仍被拒绝。
-    r"c:\windows\temp",
+    r"%WINDIR%\Temp",
 }
 
 
-def is_within_clear_root(path) -> bool:
-    """路径是否位于某个允许清空的白名单目录（含其自身）。"""
+def _resolve_root(root: str) -> str | None:
+    """把白名单根路径解析为规范化绝对路径（展开环境变量 / ~）。"""
     try:
-        s = os.path.normcase(str(path))
+        expanded = os.path.abspath(os.path.expandvars(os.path.expanduser(root)))
     except (OSError, ValueError):
+        return None
+    return os.path.normcase(expanded)
+
+
+def is_within_clear_root(path) -> bool:
+    """路径是否位于某个允许清空的白名单目录（含其自身）。
+
+    白名单根路径支持 Windows 环境变量（如 ``%WINDIR%``），每次调用时
+    动态展开，因此系统盘不是 ``C:`` 也能正确匹配；也兼容直接写入的
+    绝对路径条目（旧式配置 / 测试注入）。
+    """
+    s = _resolve_root(str(path))
+    if s is None:
         return False
-    return any(s == root or s.startswith(root + os.sep) for root in ALLOWED_CLEAR_ROOTS)
+    for root in ALLOWED_CLEAR_ROOTS:
+        r = _resolve_root(root)
+        if r is None:
+            continue
+        if s == r or s.startswith(r + os.sep):
+            return True
+    return False
 
 #: 分类 key 的文案
 CATEGORY_META: dict[str, dict[str, Any]] = {
@@ -243,6 +266,25 @@ def get_all_category_specs(
             else:
                 custom.setdefault("label", custom.get("key", "自定义分类"))
                 specs.append(custom)
+    return specs
+
+
+def get_enabled_category_specs(
+    cfg: dict[str, Any] | None = None, deep: bool = False
+) -> list[dict[str, Any]]:
+    """返回启用的分类规格（内置 + 自定义），并按配置 ``enabled_categories`` 过滤。
+
+    ``cfg`` 为 None 时重新读取配置文件；交互菜单每轮调用本函数即可实现
+    rules.json / 配置的热重载（编辑后无需重启程序，下一次扫描即生效）。
+    """
+    if cfg is None:
+        from .config import load_config  # 延迟导入，避免循环依赖
+
+        cfg = load_config()
+    specs = get_all_category_specs(merge_custom=True, deep=deep)
+    enabled = [k.lower() for k in (cfg.get("enabled_categories") or []) if k]
+    if enabled:
+        specs = [s for s in specs if s["key"].lower() in enabled]
     return specs
 
 

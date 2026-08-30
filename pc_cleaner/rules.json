@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "PC Junk Cleaner 内置清理规则（单一数据源）。",
   "note": "路径支持 Windows 环境变量（%TEMP% / %LOCALAPPDATA% / %APPDATA% / %WINDIR% / %USERPROFILE% / %SYSTEMDRIVE%）、~ 与 <CWD> 占位符；分隔符统一使用 /，运行时自动规范化。带 \"deep_only\": true 的规则只在 --deep 深度模式下启用。",
   "categories": [

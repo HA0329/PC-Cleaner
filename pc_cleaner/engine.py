@@ -304,6 +304,9 @@ def _parse_recycle_info(info_path: Path) -> tuple[str, int] | None:
 
     格式：8 字节头 + QWORD 文件大小(offset 8) + QWORD 删除时间(offset 16)
     + UTF-16LE 原始完整路径(offset 24 起)。解析失败返回 None。
+
+    兼容性说明：该格式是 Windows 内部实现（Win10/11 实测一致），解析对
+    损坏/截断/权限拒绝的数据做容错，返回 None 而不是抛异常。
     """
     try:
         data = info_path.read_bytes()
@@ -322,7 +325,8 @@ def _parse_recycle_info(info_path: Path) -> tuple[str, int] | None:
         orig = raw.decode("utf-16-le", errors="ignore").rstrip("\x00")
     except Exception:  # noqa: BLE001
         return None
-    if not orig:
+    # 拒绝仅含空字节/控制字符的垃圾数据（真实路径必然包含可打印字符）
+    if not orig or not any(ch.isprintable() for ch in orig):
         return None
     return orig, size
 

@@ -136,8 +136,22 @@ def _walk_dir(
             continue
 
 
-def _dir_size(path: Path, is_protected) -> tuple[int, int]:
-    """计算目录内可清理的字节数与文件数量（不跟随链接、跳过受保护项）。"""
+def _dir_size(
+    path: Path,
+    is_protected,
+    memo: dict[str, tuple[int, int]] | None = None,
+) -> tuple[int, int]:
+    """计算目录内可清理的字节数与文件数量（不跟随链接、跳过受保护项）。
+
+    ``memo``：同一扫描内的全局大小缓存（key 为规范化绝对路径）。
+    同一目录被多个规则命中时只递归遍历一次，避免重复统计（目录内容
+    在扫描期间视为不变；跨扫描/删除前后对比请使用新的 memo 或 None）。
+    """
+    if memo is not None:
+        key = normalize(path)
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
     total = 0
     count = 0
     for child, is_dir in _walk_dir(path, is_protected, max_depth=None):
@@ -148,6 +162,8 @@ def _dir_size(path: Path, is_protected) -> tuple[int, int]:
             count += 1
         except OSError:
             continue
+    if memo is not None:
+        memo[key] = (total, count)
     return total, count
 
 
@@ -155,14 +171,14 @@ def _dir_size(path: Path, is_protected) -> tuple[int, int]:
 # 各类 target 的扫描实现
 # ---------------------------------------------------------------------------
 def _scan_clear_dir(
-    spec: dict[str, Any], category_key: str, is_protected
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
 ) -> list[Target]:
     base = expand_path(spec["path"])
     if not base.exists() or not base.is_dir():
         return []
     if is_protected(base):
         return []
-    size, count = _dir_size(base, is_protected)
+    size, count = _dir_size(base, is_protected, memo=size_memo)
     if size == 0 and count == 0:
         return []
     label = spec.get("label", "")
@@ -180,14 +196,14 @@ def _scan_clear_dir(
 
 
 def _scan_delete_dir(
-    spec: dict[str, Any], category_key: str, is_protected
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
 ) -> list[Target]:
     base = expand_path(spec["path"])
     if not base.exists() or not base.is_dir():
         return []
     if is_protected(base):
         return []
-    size, count = _dir_size(base, is_protected)
+    size, count = _dir_size(base, is_protected, memo=size_memo)
     label = spec.get("label", "")
     return [
         Target(
@@ -202,7 +218,9 @@ def _scan_delete_dir(
     ]
 
 
-def _scan_glob_dirs(spec: dict[str, Any], category_key: str, is_protected) -> list[Target]:
+def _scan_glob_dirs(
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
+) -> list[Target]:
     base_str = spec.get("base", "")
     if not base_str:
         return []
@@ -225,7 +243,7 @@ def _scan_glob_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
             continue
         if is_protected(m):
             continue
-        size, count = _dir_size(m, is_protected)
+        size, count = _dir_size(m, is_protected, memo=size_memo)
         if size == 0 and count == 0:
             continue
         act = TargetAction.CLEAR if action == "clear" else TargetAction.DELETE
@@ -243,7 +261,9 @@ def _scan_glob_dirs(spec: dict[str, Any], category_key: str, is_protected) -> li
     return targets
 
 
-def _scan_glob_files(spec: dict[str, Any], category_key: str, is_protected) -> list[Target]:
+def _scan_glob_files(
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
+) -> list[Target]:
     base_str = spec.get("base", "")
     if not base_str:
         return []
@@ -317,7 +337,13 @@ def _resolve_bases(spec: dict[str, Any]) -> list[Path]:
     return ordered
 
 
-def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected, max_depth: int = 20) -> list[Target]:
+def _scan_find_dirs(
+    spec: dict[str, Any],
+    category_key: str,
+    is_protected,
+    max_depth: int = 20,
+    size_memo: dict | None = None,
+) -> list[Target]:
     names = {n.lower() for n in spec.get("names", [])}
     bases = _resolve_bases(spec)
     if not bases:
@@ -344,7 +370,7 @@ def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected, max_d
                 if key in seen:
                     continue
                 seen.add(key)
-                size, count = _dir_size(child, is_protected)
+                size, count = _dir_size(child, is_protected, memo=size_memo)
                 targets.append(
                     Target(
                         path=child,
@@ -359,7 +385,9 @@ def _scan_find_dirs(spec: dict[str, Any], category_key: str, is_protected, max_d
     return targets
 
 
-def _scan_files_by_rule(spec: dict[str, Any], category_key: str, is_protected) -> list[Target]:
+def _scan_files_by_rule(
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
+) -> list[Target]:
     base_str = spec.get("base", "")
     if not base_str:
         return []
@@ -416,12 +444,19 @@ def scan_spec(
     on_progress: ScanProgressCB | None = None,
     progress_idx: int = 0,
     progress_total: int = 0,
+    size_memo: dict[str, tuple[int, int]] | None = None,
 ) -> CategoryResult:
-    """扫描单个分类规格，返回 CategoryResult。"""
+    """扫描单个分类规格，返回 CategoryResult。
+
+    ``size_memo``：跨 target/分类共享的目录大小缓存（见 ``_dir_size``）；
+    None 时在本分类内新建一个。
+    """
     key = spec["key"]
     label = spec.get("label") or category_label(key)
     if is_protected is None:
         is_protected = make_protect_check()
+    if size_memo is None:
+        size_memo = {}
 
     t0 = time.time()
 
@@ -447,20 +482,37 @@ def scan_spec(
         ttype = target_spec.get("type")
         # find_dirs 特殊处理，传入 max_depth
         if ttype == "find_dirs":
-            handler = None  # 单独处理
             try:
-                targets = _scan_find_dirs(target_spec, key, is_protected, max_depth=scan_depth)
-            except Exception:  # noqa: BLE001
+                targets = _scan_find_dirs(
+                    target_spec, key, is_protected,
+                    max_depth=scan_depth, size_memo=size_memo,
+                )
+            except (PermissionError, OSError, ValueError):
+                # 预期的遍历/权限类错误：跳过该 target，不影响整体扫描
                 result.skipped += 1
+                continue
+            except Exception as exc:  # noqa: BLE001 未知异常：记录到 stderr，避免静默吞掉
+                result.skipped += 1
+                print(
+                    f"[扫描警告] 分类 {key} 的 find_dirs 目标扫描异常: {exc!r}",
+                    file=sys.stderr,
+                )
                 continue
         else:
             handler = _TARGET_HANDLERS.get(ttype)
             if handler is None:
                 continue
             try:
-                targets = handler(target_spec, key, is_protected)
-            except Exception:  # noqa: BLE001 单个 target 扫描失败不影响整体
+                targets = handler(target_spec, key, is_protected, size_memo=size_memo)
+            except (PermissionError, OSError, ValueError):
                 result.skipped += 1
+                continue
+            except Exception as exc:  # noqa: BLE001 未知异常：记录到 stderr，避免静默吞掉
+                result.skipped += 1
+                print(
+                    f"[扫描警告] 分类 {key} 的 {ttype} 目标扫描异常: {exc!r}",
+                    file=sys.stderr,
+                )
                 continue
         for t in targets:
             tpath = normalize(t.path)
@@ -481,11 +533,13 @@ def scan_all(
     """扫描所有分类（不含回收站），返回结果列表。
 
     ``recycle_bin`` 由 CLI 特殊处理，不在此扫描。
-    跨分类做全局去重：同一路径出现在多个分类时只保留第一次出现的 Target。
+    跨分类做全局去重：同一路径出现在多个分类时只保留第一次出现的 Target，
+    且共享同一个目录大小缓存（``_dir_size`` 对同一目录只递归遍历一次）。
     ``scan_depth``：find_dirs 遍历深度限制（默认 20 层）。
     ``on_progress``：扫描进度回调 (category_label, current_idx, total)。
     """
     is_protected = make_protect_check()
+    size_memo: dict[str, tuple[int, int]] = {}
     results: list[CategoryResult] = []
     seen_paths: set[str] = set()
     total = len(specs)
@@ -498,6 +552,7 @@ def scan_all(
             on_progress=on_progress,
             progress_idx=idx,
             progress_total=total,
+            size_memo=size_memo,
         )
         deduped: list[Target] = []
         for t in res.targets:

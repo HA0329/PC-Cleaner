@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.0 (2026-08)
+
+### 安全与可靠性
+- **白名单与系统盘解耦**：`ALLOWED_CLEAR_ROOTS` 从硬编码 `C:\Windows\...` 改为
+  `%WINDIR%` 环境变量占位符，每次调用动态解析——系统盘不是 `C:` 时白名单清空
+  例外也能正确生效（`is_within_clear_root` 兼容直接写绝对路径的旧式条目）。
+- **GBK 控制台崩溃修复**：中文 Windows 管道/重定向下打印 `✓ ● 🔍` 等非 GBK 字符
+  会抛 `UnicodeEncodeError` 直接崩溃；现在强制 stdout/stderr 为 UTF-8 输出
+  （`errors=replace` 兜底），`--validate-rules` 等命令在管道下不再中断。
+- **回收站 `$I` 元数据容错**：`_parse_recycle_info` 拒绝仅含空字节/控制字符的
+  垃圾数据（此前可能解析出 `'\x00\x00\ufeff'` 之类的假路径）。
+- **扫描错误处理细化**：`scan_spec` 区分「预期的 OSError/PermissionError/ValueError」
+  （静默跳过）与「未知异常」（记录 `[扫描警告]` 到 stderr，不再静默吞掉，便于调试）。
+
+### 性能
+- **目录大小缓存**：同一扫描内共享 `_dir_size` memo（按规范化路径），同一目录被
+  多个规则命中（或跨分类重复）时只递归遍历一次；`scan_all` 全局共享、`scan_spec`
+  单独调用时自动新建，行为向后兼容。
+
+### 模块拆分（cli.py 瘦身）
+- 新增 `ui.py`（共享 UI 工具：输出/确认/进度）、`menu.py`（交互菜单、预览、清理
+  执行流程）、`commands.py`（history / undo / checkup / 配置导入导出 / 规则展示
+  校验 / 提权重启 等子命令）；`cli.py` 只保留参数解析、`main` 编排与 `--json`
+  输出，并向后兼容地再导出 `_parse_selection` / `_apply_target_filters` 等测试用名。
+
+### 新功能
+- **交互菜单热重载**：菜单每轮循环重新读取 `rules.json` 与 `config.json`
+  （`get_enabled_category_specs`），编辑后无需重启程序，下一次扫描即生效。
+- **`--json --dry-run` 详细预览**：`--clean/--all` 配合 `--dry-run`（或未给
+  `--yes`）时，`action` 字段返回 `would_delete` 目标预览清单
+  （路径/类型/动作/体积），自动化脚本可先预览再决定。
+
+### 其它
+- 版本号统一为 0.7.0；新增 `tests/test_fixes.py`（14 个用例覆盖上述修复）。
+
 ## 0.6.0 (2026-08)
 
 ### 清理规则外置（单一数据源）

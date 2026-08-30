@@ -14,6 +14,23 @@ import sys
 import unicodedata
 
 
+def _force_utf8_io() -> None:
+    """把 stdout/stderr 强制为 UTF-8 输出（errors=replace 兜底）。
+
+    中文 Windows 控制台默认 GBK（cp936）编码，管道/重定向时打印 ✓ ● 🔍
+    等非 GBK 字符会抛 UnicodeEncodeError 直接崩溃；强制 UTF-8 后既保证
+    ``--json`` 等输出为合法 UTF-8，又用替换符兜底避免中断。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+_force_utf8_io()
+
+
 def enable_ansi() -> bool:
     """尝试启用 ANSI 转义序列支持（Windows）。返回是否可用。"""
     if sys.platform != "win32":

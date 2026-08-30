@@ -111,8 +111,10 @@ v0.3 升级（借鉴 GitHub 开源清理工具）：
 4. **黑名单保护**：内置绝不触碰 `C:\Windows\System32`、`C:\Windows\WinSxS`、
    `$RECYCLE.BIN`、`System Volume Information`、**微信聊天数据**
    （`WeixinShuju` / `xwechat_files`）等，并支持自定义。
-5. **白名单清空例外**：`C:\Windows\SoftwareDistribution\Download` 等位于受保护
-   前缀之下的**明确可重建缓存**，仅允许「清空内容」，删除目录本身仍被拒绝。
+5. **白名单清空例外**：`%WINDIR%\SoftwareDistribution\Download`、`%WINDIR%\Prefetch`、
+   `%WINDIR%\Temp` 等位于受保护前缀之下的**明确可重建缓存**，仅允许「清空内容」，
+   删除目录本身仍被拒绝；白名单按 `%WINDIR%` 动态解析，**与系统盘符解耦**
+   （系统盘不是 `C:` 也能正确保护）。
 6. **删除前二次防御**：engine 层再次检查每个目标——磁盘根路径与受保护路径
    一律拒绝，即使扫描器漏判也删不掉。
 7. **跳过危险结构**：不删除未知/系统目录，不跟随符号链接与 junction。
@@ -127,6 +129,13 @@ v0.3 升级（借鉴 GitHub 开源清理工具）：
 >
 > 📌 **关于浏览器隐私数据**：`browser_privacy` 分类会删除 Cookie 与浏览历史，
 > 导致**退出登录**，属于高风险分类，默认隐藏，请谨慎开启。
+>
+> 📌 **关于 `--undo-last`（回收站恢复）**：恢复依赖解析回收站 `$I` 元数据文件
+> （Windows 内部格式，Win10/11 实测一致），对损坏/截断/无权限的条目会安全跳过；
+> 若文件已被手动清空回收站或原位置已有同名文件，也无法恢复。
+>
+> 📌 **交互菜单热重载**：菜单每轮循环会重新读取 `rules.json` 与 `config.json`，
+> 编辑后**无需重启程序**，下一次扫描即生效。
 
 ---
 
@@ -225,7 +234,7 @@ python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 排序方式]
 | `--admin` | 以管理员身份重新启动（UAC 提权）后再执行 |
 | `--export-config PATH` | 把当前配置导出到 JSON 文件 |
 | `--import-config PATH` | 从 JSON 文件导入配置 |
-| `--json` | 以 JSON 输出结果；**默认只扫描**，真正删除需配合 `--yes` |
+| `--json` | 以 JSON 输出结果；**默认只扫描**，真正删除需配合 `--yes`；`--yes` 与 `--dry-run` 同时使用时以 `--dry-run` 为准（不会删除），并返回 `action.would_delete` 目标预览 |
 | `--yes` / `-y` | 跳过交互确认（谨慎使用；删除方式仍由 `--recycle`/`--permanent`/配置决定） |
 | `--show-config` | 显示当前配置文件的路径与内容 |
 | `--show-rules` | 展示 `rules.json` 内置清理规则（配合 `--deep` 显示深度规则） |
@@ -330,15 +339,18 @@ pc-cleaner/
 ├── pc_cleaner/
 │   ├── __init__.py      # 版本信息
 │   ├── __main__.py      # python -m pc_cleaner 入口（含误用提示）
-│   ├── cli.py           # 命令行与交互菜单（风险分级、checkup、history、undo、提权）
+│   ├── cli.py           # 命令行入口：参数解析、main 编排、--json 输出
+│   ├── menu.py          # 交互式菜单、预览/汇总展示、清理执行流程
+│   ├── commands.py      # 管理子命令：history / undo / checkup / 配置 / 规则 / 提权
+│   ├── ui.py            # 共享 UI 工具：输出、确认、扫描进度
 │   ├── config.py        # 配置读写（支持 PC_CLEANER_HOME 重定向）
-│   ├── console.py       # ANSI 颜色 / CJK 对齐（零依赖）
+│   ├── console.py       # ANSI 颜色 / CJK 对齐 / UTF-8 输出（零依赖）
 │   ├── engine.py        # 删除引擎（回收站/永久、二次防御、shred、白名单例外、回收站恢复）
 │   ├── history.py       # 清理历史 / 审计日志（--history / --undo-last）
 │   ├── models.py        # 数据结构
 │   ├── rules.py         # 分类规则加载/黑名单/白名单/风险分级（从 rules.json 读取）
 │   ├── rules.json       # 内置清理规则（单一数据源，含 deep_only 高级规则）
-│   └── scanner.py       # 安全扫描与体积计算（管理员感知）
+│   └── scanner.py       # 安全扫描与体积计算（管理员感知、大小缓存）
 ├── tests/               # 单元测试
 ├── pyproject.toml
 ├── README.md
@@ -366,7 +378,7 @@ pytest
   <img src="docs/donate.jpg" alt="赞赏码" width="220" />
 </p>
 
-> 图片位于仓库 `docs/donate.jpg`；若尚未上传，请手动将图片放到该路径。
+> 图片位于仓库 `docs/donate.jpg`。
 
 ---
 

@@ -106,7 +106,7 @@ def _build_parser() -> argparse.ArgumentParser:
                            help="详细展示所有目标目录/文件（不截断）")
     scan_group.add_argument("--tree", action="store_true",
                            help="以树形视图展示扫描结果")
-    scan_group.add_argument("--sort", choices=["size_desc", "size_asc", "name_asc", "count_desc"],
+    scan_group.add_argument("--sort", choices=["size_desc", "size_asc", "name_asc", "name_desc", "count_desc"],
                            default=None, help="排序方式（默认按体积从大到小）")
     scan_group.add_argument("--max-depth", type=int, default=None,
                            help="find_dirs 遍历深度限制（默认 20）")

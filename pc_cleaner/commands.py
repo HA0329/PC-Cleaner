@@ -83,6 +83,94 @@ def _cmd_undo_last() -> int:
 
 
 # ---------------------------------------------------------------------------
+# 运行环境适配（--checkup 内嵌只读小节）
+# ---------------------------------------------------------------------------
+def _cmd_print_env_adaptation() -> None:
+    """打印「运行环境适配」：本机实际装了什么、哪些缓存可清、什么只能应用内清。
+
+    全部只读探测（见 :mod:`pc_cleaner.env`）；任何单项失败不影响其它输出。
+    """
+    from .env import probe_environment, wechat_data_summary
+
+    try:
+        env = probe_environment(measure_wechat_size=True)
+    except Exception as exc:  # noqa: BLE001
+        _echo(dim(f"  （运行环境探测失败，跳过本小节: {exc}）"))
+        return
+
+    _echo(f"  {bold('运行环境适配')}")
+    try:
+        _echo(f"    系统: {env.get('os_caption', '?')} · {env.get('arch', '?')} · Python {env.get('python', '?')}")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 浏览器
+    try:
+        browsers = env.get("browsers") or []
+        installed = [b for b in browsers if b.get("installed")]
+        if installed:
+            _echo("    浏览器: " + green(" · ".join(f"{b['name']} ✓" for b in installed)))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # GPU
+    try:
+        gpu = env.get("gpu") or []
+        if gpu:
+            _echo("    GPU: " + green(" · ".join(v.upper() for v in gpu)) + dim("（着色器缓存可安全清理并自动重建）"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 微信
+    try:
+        wechat = env.get("wechat") or {}
+        layout = wechat.get("layout")
+        if layout:
+            layout_txt = {"wechat4": "微信 4.x（新版 Weixin）", "wechat3": "微信 3.x"}.get(layout, layout)
+            loc = "roaming %APPDATA%/Tencent/xwechat" if wechat.get("roaming4") else "roaming %APPDATA%/Tencent/WeChat"
+            _echo(f"    微信: {green(layout_txt)}（{loc} 运行缓存可清）")
+            for line in wechat_data_summary(env):
+                _echo(f"      {yellow('⚠')} {dim(line)}")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Steam / pnpm store
+    try:
+        steam = env.get("steam") or {}
+        if steam.get("installed"):
+            libs = steam.get("library_dirs") or []
+            txt = "Steam ✓"
+            if libs:
+                txt += dim(f"（库: {', '.join(libs)}）")
+            _echo("    游戏: " + green(txt))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        stores = env.get("pnpm_stores") or []
+        stores = [s for s in stores if s.lower().endswith(".pnpm-store")]
+        if stores:
+            _echo("    pnpm store: " + green(" · ".join(stores)) + dim("（dev_caches 分类可清）"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 开发工具
+    try:
+        tools = sorted(k for k, v in (env.get("dev_tools") or {}).items() if v)
+        if tools:
+            _echo("    开发工具: " + green(", ".join(tools)))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 未检测到的浏览器 → 对应缓存分类为空的原因提示
+    try:
+        absent = [b["name"] for b in (env.get("browsers") or []) if not b.get("installed")]
+        if absent:
+            _echo(dim(f"    未检测到: {', '.join(absent)}（相关浏览器缓存分类将显示为空）"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ---------------------------------------------------------------------------
 # 一键体检
 # ---------------------------------------------------------------------------
 def _cmd_checkup(
@@ -102,6 +190,10 @@ def _cmd_checkup(
     _echo(f"  {bold('系统状态')}")
     _echo(f"    管理员权限: {'✓ ' + green('是') if is_admin() else '✗ ' + yellow('否（系统深度清理将跳过，可用 --admin 提权）')}")
     _echo(f"    回收站支持: {'✓ ' + green('是（删除可恢复）') if recycle_available() else '✗ ' + yellow('否（将永久删除，建议 pip install send2trash）')}")
+    _echo("")
+
+    # 运行环境适配（只读探测本机实际安装了哪些东西）
+    _cmd_print_env_adaptation()
     _echo("")
 
     # 磁盘信息

@@ -33,7 +33,6 @@ from .rules import get_enabled_category_specs
 from .scanner import is_admin, recycle_bin_size, scan_all
 from .ui import (
     ScanProgressDisplay,
-    _admin_tag,
     _echo,
     _risk_badge,
     prompt_yes_no,
@@ -158,8 +157,17 @@ def _preview_targets(
     _echo(f"    总计: {len(ordered)} 项, 可释放 {green(format_size(total_size))}")
 
 
-def _print_summary_table(results: list[CategoryResult], bin_size: int = 0) -> None:
-    """打印分类汇总表（表格式）。列宽统一，边框动态生成。"""
+def _print_summary_table(
+    results: list[CategoryResult],
+    *,
+    selectable: list[int] | None = None,
+) -> None:
+    """打印分类汇总表（表格式）。列宽统一，边框动态生成。
+
+    ``selectable``：可清理分类在 results 中的下标（0-based），只给这些分类
+    编号展示；其它（0 项 / 需管理员未扫描）由菜单页脚以小结形式列出。
+    为 None 时展示全部（用于只读报告场景）。
+    """
     # ---- 列宽定义（显示宽度，不含两侧空格）----
     COL_NO = 5        # 编号，如 " 1."
     COL_CAT = 24      # 分类名（含风险标记 ● + 空格）
@@ -203,6 +211,11 @@ def _print_summary_table(results: list[CategoryResult], bin_size: int = 0) -> No
             f"│ {size_disp} │"
         )
 
+    if selectable is None:
+        selectable = list(range(len(results)))
+    sel_set = set(selectable)
+    number_of = {orig: k for k, orig in enumerate(selectable, start=1)}
+
     _echo("")
     _echo(bold(f"  ┌{'─' * BORDER_W}┐"))
     # 表头（纯文本居中/左对齐）
@@ -219,9 +232,12 @@ def _print_summary_table(results: list[CategoryResult], bin_size: int = 0) -> No
     total_targets = 0
     total_files = 0
 
-    for i, res in enumerate(results, start=1):
+    for i, res in enumerate(results):
+        if i not in sel_set:
+            continue  # 空分类 / 未扫描分类由页脚小结，不占可选项编号
+        k = number_of[i]
         badge = _risk_badge(res.risk)
-        no_str = f"{i}."
+        no_str = f"{k}."
         cat = _cat_cell(badge, res.label)
 
         if res.admin_blocked:
@@ -261,40 +277,121 @@ def _print_summary_table(results: list[CategoryResult], bin_size: int = 0) -> No
     )
     _echo(bold(f"  └{'─' * BORDER_W}┘"))
 
-    if bin_size > 0:
-        _echo(f"  回收站占用: {red(format_size(bin_size))}")
 
+def _print_menu_footer(
+    results: list[CategoryResult],
+    bin_size: int,
+    selectable: list[int],
+    show_risky: bool,
+) -> None:
+    """打印菜单页脚：回收站行、空分类小结与操作图例。
 
-def _print_full_menu(results: list[CategoryResult], bin_size: int, show_risky: bool, sort_by: str = "size_desc") -> None:
-    _echo("")
-    _echo(bold("可清理的分类："))
-    for i, res in enumerate(results, start=1):
-        badge = _risk_badge(res.risk)
-        tag = _admin_tag(res.requires_admin)
-        if res.admin_blocked:
-            _echo(
-                f"  {cyan(str(i))}. {badge} {res.label}{tag}  "
-                f"({yellow('需管理员权限，当前未提权，已跳过')})"
-            )
-        elif res.targets:
-            _echo(
-                f"  {cyan(str(i))}. {badge} {res.label}{tag}  "
-                f"({res.total_count} 项, 约 {green(format_size(res.liberatable))})"
-            )
-        else:
-            _echo(f"  {cyan(str(i))}. {badge} {res.label}{tag}  (0 项)")
-
+    汇总表只编号「有内容」的分类（selectable），这里补充说明未编号的行
+    （当前为空 / 需管理员未扫描），并列出可用的操作键。
+    """
+    # 回收站行
     if bin_size > 0:
         _echo(f"  {red('r')}. 回收站 (清空, 占用 {yellow(format_size(bin_size))})")
     else:
-        _echo("  r. 回收站 (清空)")
-    _echo("  q. 退出")
+        _echo(f"  {dim('r')}. 回收站 (清空)")
+    _echo("")
+
+    # 空分类 / 未编号小结
+    notes: list[str] = []
+    sel_set = set(selectable)
+    for i, res in enumerate(results):
+        if i in sel_set:
+            continue
+        if res.admin_blocked:
+            notes.append(f"{yellow(res.label)}(需管理员)")
+        elif res.targets:
+            notes.append(res.label)  # 理论上有内容但没进 selectable，正常不应发生
+        else:
+            notes.append(dim(f"{res.label}(空)"))
+    if notes:
+        _echo(dim("  其余分类(未编号, 当前无可清理): " + " · ".join(notes)))
+    if not show_risky:
+        risky_hidden = [r.label for r in results if r.risk == "risky"]
+        if risky_hidden:
+            _echo(dim("  （高风险分类已隐藏: " + " · ".join(risky_hidden) + "，按 x 查看）"))
 
     _echo("")
-    _echo(dim("  操作："))
-    _echo(dim("    d <编号>  → 查看该分类详细目录列表    t <编号>  → 树形视图"))
-    _echo(dim("    s <方式>  → 切换排序(size/name/count)  x        → 切换高风险分类"))
+    _echo(dim("  操作: "))
+    _echo(dim("    编号 如 1,3-5   选择分类（逗号/区间分隔，可多选）"))
+    _echo(dim("    all             全选 · r 回收站 · 0 清空选择"))
+    _echo(dim("    d <编号> 详情    t <编号> 树形 · s <排序> 切换 · x 高风险 · q 退出"))
     _echo("")
+
+
+def _print_env_adaptation(env: dict[str, Any] | None = None) -> None:
+    """打印「本机适配」一行：这台机器实际装了哪些东西（只读探测结果）。"""
+    try:
+        if env is None:
+            from .env import probe_environment
+
+            env = probe_environment(measure_wechat_size=False)
+        if not isinstance(env, dict):
+            return
+    except Exception:  # noqa: BLE001 探测失败不影响菜单可用
+        return
+
+    parts: list[str] = []
+    try:
+        browsers = [b for b in env.get("browsers", []) if b.get("installed")]
+        if browsers:
+            parts.append(green("浏览器 " + ", ".join(b["name"] for b in browsers)))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        gpu = env.get("gpu") or []
+        if gpu:
+            parts.append(green("GPU " + ", ".join(g.upper() for g in gpu)))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        wechat = env.get("wechat") or {}
+        if wechat.get("layout") == "wechat4":
+            parts.append(green("微信 4.x"))
+        elif wechat.get("layout") == "wechat3":
+            parts.append(green("微信 3.x"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        stores = env.get("pnpm_stores") or []
+        stores = [s for s in stores if s.lower().endswith(".pnpm-store")]
+        if stores:
+            parts.append(green(f"pnpm store({stores[0]})"))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        steam = env.get("steam") or {}
+        if steam.get("installed"):
+            libs = steam.get("library_dirs") or []
+            loc = ""
+            if libs:
+                # 形如 D:\Program Files (x86)\Steam\steamapps → 去掉 \steamapps
+                parent = libs[0][:-10].rstrip("\\/")
+                loc = f"({parent})"
+            parts.append(green(f"Steam{loc}"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    if parts:
+        _echo("")
+        _echo(dim("  本机适配: ") + "  ".join(parts))
+        try:
+            hints = []
+            for b in env.get("browsers", []):
+                if not b.get("installed") and b["key"] in ("chrome", "firefox", "brave", "vivaldi", "opera"):
+                    hints.append(b["name"])
+            tools = {k: v for k, v in (env.get("dev_tools") or {}).items() if v}
+            if hints:
+                _echo(dim("  未检测到: ") + dim(" · ".join(hints)) + dim("  (相关缓存分类将显示为空)"))
+            if tools:
+                _echo(dim("  开发工具: ") + dim(", ".join(sorted(tools))))
+        except Exception:  # noqa: BLE001
+            pass
+        _echo("")
 
 
 def _print_detail_for_category(res: CategoryResult, sort_by: str = "size_desc") -> None:
@@ -322,27 +419,67 @@ def _print_detail_for_category(res: CategoryResult, sort_by: str = "size_desc") 
     _preview_targets(res.targets, max_lines=0, sort_by=sort_by, compact=False)
 
 
-def _parse_selection(raw: str, n: int) -> set[int] | str:
+# ---------------------------------------------------------------------------
+# 用户选择解析（支持编号 / 区间 / all / none / r(回收站)）
+# ---------------------------------------------------------------------------
+def _split_choice_tokens(raw: str) -> list[str]:
+    """把用户输入拆成小写 token：兼容中文逗号/顿号/分号与空白分隔。"""
+    norm = raw.replace("，", ",").replace("；", ",").replace("、", ",")
+    return [t.strip().lower() for t in norm.replace(",", " ").split() if t.strip()]
+
+
+def _expand_range(tok: str, n: int) -> list[int]:
+    """把 ``2-5`` 这类区间 token 展开为编号列表；非法 token 返回空列表。"""
+    if "-" not in tok:
+        return []
+    left, _, right = tok.partition("-")
+    if not left.isdigit() or not right.isdigit():
+        return []
+    lo, hi = int(left), int(right)
+    if lo > hi:
+        lo, hi = hi, lo
+    return [i for i in range(max(lo, 1), min(hi, n) + 1)]
+
+
+def _parse_selection(raw: str, n: int) -> dict[str, Any]:
     """解析用户输入的分类选择。
 
-    返回集合（选中的索引 1..n），或字符串 'all' / 'none'。
+    返回 ``{"all": bool, "none": bool, "recycle": bool, "indexes": set[int]}``：
+    - ``indexes`` 是 1..n 的选中编号；
+    - ``recycle=True`` 表示同时要求清空回收站（输入 ``r`` / ``rb``）；
+    - ``all``（``all/a/*``）表示选择全部；``none``（``none/n/0``）表示清空。
     """
-    tokens = [t.strip().lower() for t in raw.replace("，", ",").split(",") if t.strip()]
+    tokens = _split_choice_tokens(raw)
+    out: dict[str, Any] = {"all": False, "none": False, "recycle": False, "indexes": set()}
     if not tokens:
-        return set()
-    sel: set[int] = set()
+        return out
     for tok in tokens:
         if tok in ("all", "a", "*"):
-            return "all"
-        if tok in ("none", "n", "0"):
-            return "none"
-        try:
+            out["all"] = True
+        elif tok in ("none", "n", "0"):
+            out["none"] = True
+        elif tok in ("r", "rb"):
+            out["recycle"] = True
+        elif tok.isdigit():
             idx = int(tok)
-        except ValueError:
-            continue
-        if 1 <= idx <= n:
-            sel.add(idx)
-    return sel
+            if 1 <= idx <= n:
+                out["indexes"].add(idx)
+        elif "-" in tok:
+            out["indexes"].update(_expand_range(tok, n))
+    # none（0/n）优先：清空选择；除非同时给了 all（矛盾输入时以 all 为准）
+    if out["none"] and not out["all"]:
+        out["indexes"] = set()
+        out["recycle"] = False
+    return out
+
+
+def selectable_rows(results: list[CategoryResult]) -> list[int]:
+    """返回「有内容可选」的分类在 results 中的下标（0-based），按原顺序。
+
+    交互菜单只给这些分类编号，避免列出大量 0 项分类造成选择困扰；
+    ``d <编号>`` / ``t <编号>`` 用同一份编号（1-based 对应本列表下标）。
+    """
+    return [i for i, r in enumerate(results) if r.targets]
 
 
 def _print_disk_free(results: list[CategoryResult]) -> None:
@@ -415,23 +552,28 @@ def _run_clean_flow(
     older_than_secs: int | None = None,
 ) -> dict[str, Any]:
     """对选中的分类执行：预览 -> 确认 -> 删除。"""
-    targets = _collect_targets(selected)
-    targets = _apply_target_filters(
-        targets,
-        ext_filter=ext_filter,
-        min_size_bytes=min_size_bytes,
-        older_than_secs=older_than_secs,
-    )
+    # 预览与删除使用同一份过滤结果，避免“预览了但没删/删了没预览”的偏差
+    per_category: list[tuple[Any, list[Any]]] = []
+    for res in selected:
+        fl = _apply_target_filters(
+            res.targets,
+            ext_filter=ext_filter,
+            min_size_bytes=min_size_bytes,
+            older_than_secs=older_than_secs,
+        )
+        if fl:
+            per_category.append((res, fl))
+    targets = [t for _, fl in per_category for t in fl]
+
     max_lines = int(cfg.get("preview_lines", 12) or 12)
     sort_by = cfg.get("default_sort", "size_desc")
 
     _echo("")
     if targets:
         _echo(bold("将删除以下内容（预览）："))
-        for res in selected:
-            if res.targets:
-                _echo(f"  【{res.label}】")
-                _preview_targets(res.targets, max_lines=max_lines, sort_by=sort_by)
+        for res, fl in per_category:
+            _echo(f"  【{res.label}】")
+            _preview_targets(fl, max_lines=max_lines, sort_by=sort_by)
 
     if empty_bin and not dry_run:
         _echo(f"  【回收站】将清空回收站（{red('不可恢复')}）。")
@@ -527,7 +669,7 @@ def _interactive(
     ``deep``：传入 ``--deep`` 标志，每轮循环重新加载 rules.json / 配置
     （热重载：编辑规则或配置后无需重启，下一轮扫描即生效）。
     """
-    from .scanner import print_report, print_tree_report
+    from .scanner import print_tree_report
 
     _echo("")
     _echo(bold(f"=== PC Junk Cleaner v{__version__} ==="))
@@ -540,27 +682,30 @@ def _interactive(
     else:
         _echo(yellow("  管理员权限: 否（系统深度清理分类将跳过，可用 --admin 提权）"))
 
+    # 本机环境适配一行（只读探测：浏览器 / GPU / 微信 / Steam / pnpm store）
+    _print_env_adaptation()
+
     while True:
         # 热重载：每轮重新读取配置与 rules.json，修改无需重启即可生效
         cfg = load_config()
         specs = get_enabled_category_specs(cfg, deep=deep)
 
-        _print_summary_table(results)
+        # 只给「有内容」的分类编号，其余由页脚小结
+        rows = selectable_rows(results)
+        n = len(rows)
+        bin_size = recycle_bin_size() if sys.platform == "win32" else 0
+
+        _print_summary_table(results, selectable=rows)
         _echo("")
         _print_disk_free(results)
-        bin_size = recycle_bin_size() if sys.platform == "win32" else 0
-        if bin_size > 0:
-            _echo(dim(f"  回收站占用: {format_size(bin_size)}"))
+        _print_menu_footer(results, bin_size, rows, show_risky)
 
         selected: list[CategoryResult] = []
         empty_bin = False
-        n = len(results)
 
         while True:
-            _print_full_menu(results, bin_size, show_risky, sort_by)
-            choice = ""
             try:
-                choice = input("请选择（编号/d+t查看/s排序/x切换/q退出）: ").strip()
+                choice = input("请选择（编号/all/r/d/t/s/x/q）: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
@@ -574,61 +719,57 @@ def _interactive(
             if action in ("q", "quit", "exit"):
                 return 0
 
-            # d <编号> → 查看详细
+            # d <编号> → 查看详细（编号对应汇总表里的可选项）
             if action == "d":
                 if len(cmd) > 1:
-                    try:
-                        idx = int(cmd[1])
-                        if 1 <= idx <= n:
-                            _print_detail_for_category(results[idx - 1], sort_by)
+                    if cmd[1].isdigit():
+                        k = int(cmd[1])
+                        if 1 <= k <= n:
+                            _print_detail_for_category(results[rows[k - 1]], sort_by)
                         else:
                             _echo(red(f"  编号超出范围（1-{n}）"))
-                    except ValueError:
+                    else:
                         _echo(red("  请输入有效编号，如: d 3"))
                 else:
-                    # 无参数时显示所有分类的详细列表
-                    for res in results:
-                        _print_detail_for_category(res, sort_by)
+                    for i in rows:
+                        _print_detail_for_category(results[i], sort_by)
                 continue
 
             # t <编号> → 树形视图
             if action == "t":
                 if len(cmd) > 1:
-                    try:
-                        idx = int(cmd[1])
-                        if 1 <= idx <= n:
-                            print_tree_report([results[idx - 1]])
+                    if cmd[1].isdigit():
+                        k = int(cmd[1])
+                        if 1 <= k <= n:
+                            print_tree_report([results[rows[k - 1]]])
                         else:
                             _echo(red(f"  编号超出范围（1-{n}）"))
-                    except ValueError:
+                    else:
                         _echo(red("  请输入有效编号，如: t 2"))
                 else:
-                    print_tree_report(results)
+                    print_tree_report([results[i] for i in rows])
                 continue
 
             # s <方式> → 切换排序
             if action == "s":
+                valid_sorts = {"size_desc": "体积↓", "size_asc": "体积↑",
+                               "name_asc": "名称↑", "name_desc": "名称↓",
+                               "count_desc": "文件数↓"}
+                sort_options = ["size_desc", "size_asc", "name_asc", "name_desc", "count_desc"]
                 if len(cmd) > 1:
                     new_sort = cmd[1]
-                    valid_sorts = {"size_desc": "体积↓", "size_asc": "体积↑",
-                                  "name_asc": "名称↑", "name_desc": "名称↓",
-                                  "count_desc": "文件数↓"}
                     if new_sort in valid_sorts:
                         sort_by = new_sort
                         _echo(green(f"  已切换排序为: {valid_sorts[new_sort]}"))
                     else:
                         _echo(red(f"  无效排序方式。可选: {', '.join(valid_sorts.keys())}"))
                 else:
-                    # 循环切换排序
-                    sort_options = ["size_desc", "size_asc", "name_asc", "count_desc"]
-                    sort_labels = {"size_desc": "体积↓", "size_asc": "体积↑",
-                                  "name_asc": "名称↑", "count_desc": "文件数↓"}
                     current_idx = sort_options.index(sort_by) if sort_by in sort_options else 0
                     sort_by = sort_options[(current_idx + 1) % len(sort_options)]
-                    _echo(green(f"  已切换排序为: {sort_labels[sort_by]}"))
+                    _echo(green(f"  已切换排序为: {valid_sorts[sort_by]}"))
                 continue
 
-            # x → 切换高风险显示
+            # x → 切换高风险显示（重新扫描）
             if action in ("x", "risky"):
                 show_risky = not show_risky
                 if show_risky:
@@ -639,26 +780,23 @@ def _interactive(
                 fresh = scan_all(specs, scan_depth=scan_depth, on_progress=progress if show_progress else None)
                 progress.finish(fresh)
                 results = [r for r in fresh if show_risky or r.risk != "risky"]
-                n = len(results)
                 continue
 
-            # 数字选择
+            # 分类选择：编号 / 区间 / all / r（回收站）
             sel = _parse_selection(choice, n)
-            if sel == "none":
+            if sel["none"] and not sel["all"] and not sel["indexes"] and not sel["recycle"]:
                 selected = []
                 empty_bin = False
                 _echo("  已清空选择。")
                 continue
-            if sel == "all":
-                selected = list(results)
-                empty_bin = True
-                break
-            if sel:
-                selected = [results[i - 1] for i in sorted(sel)]
-                empty_bin = False
+            if sel["all"]:
+                sel["indexes"] = set(range(1, n + 1))
+            if sel["indexes"] or sel["recycle"]:
+                selected = [results[rows[i - 1]] for i in sorted(sel["indexes"])]
+                empty_bin = sel["recycle"]
                 break
 
-            _echo(red("  无效输入，请重新选择。"))
+            _echo(red("  无效输入，请重新选择（编号/all/r/d/t/s/x/q）。"))
 
         # 过滤掉没有内容的分类
         selected = [r for r in selected if r.targets]

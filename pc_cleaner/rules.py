@@ -1,20 +1,22 @@
 """清理分类规则（针对本机定制）。
 
-这里的分类与路径是基于对实际机器扫描得出的结果设计（详见 README），
-集中命中真正堆积的缓存：GPU 着色器缓存、微信运行缓存、Edge/Steam 网页
-缓存、游戏平台更新包、pnpm 缓存、系统临时文件等。
+这里的分类与路径基于对实际机器的探测与实测设计（详见 README / env.py），
+集中命中真正存在的缓存：GPU 着色器缓存（NVIDIA/AMD/DirectX）、微信 4.x
+网络缓存、Edge/Steam 网页缓存、游戏平台更新包、pnpm store（本机在
+``D:\\.pnpm-store``）、系统临时文件等。
 
 内置规则自 v0.6 起统一维护在随包附带的 ``rules.json`` 中（单一数据源），
 本模块负责加载并做安全过滤（deep_only 深度规则、自定义规则合并）。
 
 安全原则：
 - 只清理"明确的缓存/临时"目录；绝不触碰用户数据与正在使用的文件。
-- 微信：只清理 ``%APPDATA%\\Tencent\\xwechat`` 下的 xplugin / radium / log /
-  crashinfo 等运行缓存；**绝不**触碰 ``D:\\WeixinShuju``（聊天数据，占 14GB），
-  那块请用微信自带的存储空间管理来清理。
-- GPU 着色器缓存（DXCache/GLCache）可安全清理，程序会自动重建。
+- 微信 4.x：聊天数据在**数据目录**（如 ``D:\\WeixinShuju``，内含
+  ``xwechat_files``），本工具只清理 ``%APPDATA%\\Tencent\\xwechat`` 下的
+  网络缓存，**绝不**触碰数据目录（那块请用微信自带的存储空间管理清理）。
+- GPU 着色器缓存（DXCache/GLCache/D3DSCache）可安全清理，程序会自动重建。
 
 路径字符串支持 Windows 环境变量（如 ``%LOCALAPPDATA%``）与 ``~``。
+本机适配探测见 :mod:`pc_cleaner.env`。
 """
 
 from __future__ import annotations
@@ -125,7 +127,7 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "gpu_caches": {
         "label": "GPU 着色器缓存",
-        "description": "NVIDIA / AMD 着色器缓存，可安全清理并自动重建",
+        "description": "NVIDIA / AMD / DirectX 着色器缓存，可安全清理并自动重建",
         "risk": "safe",
     },
     "web_cache": {
@@ -135,7 +137,7 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "wechat_cache": {
         "label": "微信运行缓存",
-        "description": "仅清理 xplugin/radium/log 等缓存，不动聊天数据",
+        "description": "微信 4.x 网络缓存（数据目录中的聊天记录绝不触碰）",
         "risk": "safe",
     },
     "game_caches": {

@@ -7,6 +7,33 @@
 告诉你每个分类能释放多少空间、列出将删除的文件，**经你确认后**才动手。
 默认可以删除到回收站（可恢复），并且内置了受保护路径保护与删除前二次防御。
 
+v0.8 升级（本机实测适配 · 更好的交互）：
+
+- **运行环境自适应探测**（新增 `env.py`，只读）：自动识别本机实际安装的浏览器
+  （Edge/Chrome/Firefox/Brave/Vivaldi/Opera）、GPU 厂商、微信布局（3.x/4.x）
+  与**微信数据目录**、Steam 库、pnpm store 实际位置、PATH 开发工具。
+- **`--checkup` 新增「运行环境适配」小节** + 交互菜单顶部「本机适配」一行：
+  这台机器装了什么一目了然；微信数据目录（如本机 `D:\WeixinShuju`）会提示
+  "请在微信内清理"，工具绝不触碰聊天数据。
+- **微信缓存分类修正为微信 4.x**：只清 `%APPDATA%\Tencent\xwechat\net` /
+  `net_1`（4.x 实际存在的网络缓存），删除 3.x 时期已不存在的死路径。
+- **GPU 分类补充 DirectX 着色器缓存**（`%LOCALAPPDATA%\D3DSCache`）。
+- **交互菜单更好用**：汇总表即菜单，只给"有内容"的分类编号；输入 `r` 即可连
+  回收站一起清（修复了菜单印着 `r. 回收站` 却无法输入的断头热键）；支持区间
+  选择（`1,3-5`、`2-4 r`）；排序补齐 `name_desc`。
+- **预览与删除同源**：预览展示的是过滤（`--ext/--min-size-mb/--older-than-days`）
+  后真正会删的内容，不再"预览一套、删除另一套"。
+
+v0.7 升级（交互菜单热重载 & 模块拆分）：
+
+- **交互菜单热重载**：每轮循环重新读取 `rules.json` 与 `config.json`，编辑后
+  无需重启，下一次扫描即生效。
+- **模块拆分**：`cli.py` 瘦身为参数解析 + 主流程 + JSON 输出；交互菜单 → `menu.py`，
+  管理子命令（history/undo/checkup/配置/规则/提权）→ `commands.py`，共享 UI →
+  `ui.py`；`--json --dry-run` 可返回 `would_delete` 目标预览。
+- **安全加固**：白名单清空目录与系统盘解耦（`%WINDIR%` 动态解析）、回收站
+  `$I` 元数据容错、扫描错误分级记录、同一目录跨分类只统计一次（性能）。
+
 v0.5 升级（目录显示增强 & 扫描优化）：
 
 - **`--detail` 详细展示**：完整展示每个分类下的所有目标目录/文件，不再截断；交互菜单中可按 `d` 查看单个或全部详情。
@@ -56,21 +83,28 @@ v0.3 升级（借鉴 GitHub 开源清理工具）：
 
 ---
 
-## 📌 本机实测（按实际扫描结果定制）
+## 📌 本机实测（2026-09 · 按实际电脑探测结果定制）
 
-| 分类 key | 名称 | 风险 | 最近一次扫描 |
+> 工具启动时会**自动探测**本机实际安装的浏览器 / GPU / 微信 / Steam / pnpm store
+> 等（见下方「运行环境」），只清真正存在的内容，未安装软件的缓存分类自动显示为空。
+
+| 分类 key | 名称 | 风险 | 本机实际命中（探测结果） |
 | --- | --- | --- | --- |
-| `system_temp` | 系统临时文件 | 🟢 | 用户 Temp、缩略图/图标缓存、WebCache、WER、最近文档/跳转列表 |
-| `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA DXCache / GLCache |
-| `web_cache` | 浏览器/网页缓存 | 🟢 | Edge/Chrome/Firefox/Brave/Vivaldi/Opera/Steam |
-| `wechat_cache` | 微信运行缓存 | 🟢 | xplugin / radium / log / crashinfo |
-| `game_caches` | 游戏平台缓存 | 🟡 | 完美世界更新包、Steam 缓存/日志 |
-| `dev_caches` | 开发工具缓存 | 🟡 | pnpm / pip / npm / uv / yarn / Go / cargo / NuGet / Gradle |
-| `downloads` | 下载/旧文件 | 🔴 | 大文件、久未使用文件、安装包（默认隐藏） |
-| `system_admin` | 系统深度清理 | 🟡 | Windows 更新缓存、系统 Temp、chkdsk 残留、更新日志、备份残留、Prefetch、事件日志归档、崩溃转储（需管理员） |
-| `windows_old` | 旧版 Windows 残留 | 🔴 | `C:\Windows.old`（默认隐藏，需管理员） |
-| `dev_purge` | 项目构建产物 | 🔴 | 散落 node_modules / dist / build / target（默认隐藏） |
-| `browser_privacy` | 浏览器隐私数据 | 🔴 | Cookie 与浏览历史（默认隐藏，会退出登录） |
+| `system_temp` | 系统临时文件 | 🟢 | 用户 Temp、Edge WebCache、缩略图/图标缓存、最近文档等 ≈ 43 MB |
+| `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA RTX 3060 → DXCache / GLCache + DirectX D3DSCache |
+| `web_cache` | 浏览器/网页缓存 | 🟢 | 本机只有 **Edge**（其余浏览器未安装）≈ 63 MB |
+| `wechat_cache` | 微信运行缓存 | 🟢 | **微信 4.x**（Weixin）：roaming `xwechat\net\net_1` ≈ 2 MB |
+| `game_caches` | 游戏平台缓存 | 🟡 | Steam 装在 `D:\Program Files (x86)\Steam`，缓存当前为空 |
+| `dev_caches` | 开发工具缓存 | 🟡 | **pnpm store `D:\.pnpm-store` ≈ 1.4 GB** + `pnpm-cache` ≈ 322 MB |
+| `downloads` | 下载/旧文件 | 🔴 | Downloads 当前为空（默认隐藏） |
+| `system_admin` | 系统深度清理 | 🟡 | Windows\Temp、更新缓存等 ≈ 1 MB（需管理员，已提权） |
+| `windows_old` | 旧版 Windows 残留 | 🔴 | 不存在（默认隐藏，需管理员） |
+| `dev_purge` | 项目构建产物 | 🔴 | 需在对应工作目录运行才有命中（默认隐藏） |
+| `browser_privacy` | 浏览器隐私数据 | 🔴 | Edge 的 Cookie/History（默认隐藏，会退出登录） |
+
+> ⚠️ **微信数据目录（本机 `D:\WeixinShuju`，约 13.7 GB）不在清理范围内**：它含聊天
+> 记录等用户数据，本工具的黑名单明确禁止触碰；`--checkup` 与交互菜单会提示你改用
+> 微信「设置 → 存储空间」清理。同样受保护的还有 `D:\WeixinShuju\xwechat_files` 等。
 
 ---
 
@@ -93,7 +127,13 @@ v0.3 升级（借鉴 GitHub 开源清理工具）：
 - 📦 **配置导入导出**：`--export-config` / `--import-config`
 - 🎨 **友好界面**：Windows 控制台 ANSI 彩色输出（自动降级）、中文对齐、
   磁盘可用空间与回收站占用展示
-- 🎛 **交互式菜单**：默认运行即进入菜单，可循环多轮选择清理，`x` 切换高风险显示
+- 🧭 **本机适配**：启动时只读探测这台机器（浏览器/GPU/微信布局/Steam/pnpm store/
+  开发工具），`--checkup` 有「运行环境适配」小节，交互菜单顶部有「本机适配」行；
+  未安装软件的缓存分类会明确显示为空，避免"为啥这项是 0"的疑惑
+- 🎛 **交互式菜单**：默认运行即进入菜单，可循环多轮选择清理；**汇总表即菜单**
+  （只给有内容的分类编号）、支持区间选择（`1,3-5`）、`r` 连回收站一起清、
+  `d` 详情 / `t` 树形 / `s` 排序 / `x` 切换高风险显示 / `q` 退出
+- ♻️ **回收站一键处理**：菜单直接选 `r`（或 `--clean recycle_bin`）清空回收站
 - ⚙️ **可配置**：`config.json` 可保存回收站偏好、失败回退策略、额外保护路径、
   自定义规则、只扫描指定分类、预览行数、是否显示高风险、是否记录历史等
 
@@ -123,9 +163,11 @@ v0.3 升级（借鉴 GitHub 开源清理工具）：
 
 > ⚠️ 清理工具天然有风险。请务必先看**预览清单**，不确定的分组不要勾选。
 >
-> 📌 **关于微信**：本工具只清理 `%APPDATA%\Tencent\xwechat` 下的**运行缓存**
-> （xplugin / radium / log / crashinfo），**不会**删除你的聊天记录、图片、视频或文件。
-> 若微信数据目录占用很大，请用微信「设置 → 存储空间」的官方清理功能处理。
+> 📌 **关于微信**：本机是**微信 4.x**（Weixin）。本工具只清理
+> `%APPDATA%\Tencent\xwechat` 下的**网络运行缓存**（`net` / `net_1`），
+> **不会**删除你的聊天记录、图片、视频或文件（聊天数据在数据目录如
+> `D:\WeixinShuju`，黑名单明确禁止触碰）。若数据目录占用很大，请用
+> 微信「设置 → 存储空间」的官方清理功能处理。
 >
 > 📌 **关于浏览器隐私数据**：`browser_privacy` 分类会删除 Cookie 与浏览历史，
 > 导致**退出登录**，属于高风险分类，默认隐藏，请谨慎开启。
@@ -139,13 +181,24 @@ v0.3 升级（借鉴 GitHub 开源清理工具）：
 
 ---
 
-## 🖥 运行环境
+## 🖥 运行环境（本机实测 · 适配依据）
 
-- **OS**：Microsoft Windows 11 IoT Enterprise LTSC（Build 26100，24H2）
+- **OS**：Windows IoT Enterprise LTSC，内核 10.0.26100（24H2，管理员账户；
+  注册表 ProductName 显示 "Windows 10 IoT Enterprise LTSC 2024"）
 - **CPU / 内存**：AMD Ryzen 5 5600（6 核 12 线程）/ 16 GB
-- **磁盘**：C 盘 150 GB（系统）、D 盘 327 GB（软件）
+- **GPU**：NVIDIA GeForce RTX 3060（对应 `gpu_caches` 分类命中 DXCache/GLCache/D3DSCache）
+- **磁盘**：C 盘 150 GB（系统，可用 ≈124 GB）、D 盘 326.6 GB（可用 ≈155 GB）
+- **浏览器**：仅 **Microsoft Edge**（Chrome/Firefox/Brave/Vivaldi/Opera 均未安装，
+  相关规则保留给其它机器，本机自动为空）
+- **微信**：**4.x**（Weixin 4.1.12，装在 `D:\Weixin`；数据目录 `D:\WeixinShuju` ≈13.7GB，
+  由微信自身管理，本工具不碰）
+- **游戏**：Steam 装在 `D:\Program Files (x86)\Steam`
+- **开发工具**：Node/npm/pnpm（store 在 **`D:\.pnpm-store`**）、Python pip、Java、.NET、
+  Git；未装 Go/cargo/uv 等（对应缓存为空）
 - **Python**：3.12.3（建议 3.10+）
 
+> 以上均为**只读探测**结果（见 `pc_cleaner/env.py`），换一台电脑运行时工具会自动
+> 探测新机器并只显示实际存在的内容。
 > Windows 之外平台可运行，但分类路径以 Windows 为目标；
 > 需管理员的分类与回收站恢复仅 Windows 有效。
 
@@ -210,7 +263,7 @@ python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 排序方式]
 | `--list` / `-l` | 仅扫描，列出各分类的占用与可清理体积、磁盘可用、回收站占用，不删除 |
 | `--detail` / `-d` | 详细展示每个分类下的所有目标目录/文件（不截断） |
 | `--tree` | 以树形视图展示扫描结果 |
-| `--sort 方式` | 排序方式：`size_desc`(默认) / `size_asc` / `name_asc` / `count_desc` |
+| `--sort 方式` | 排序方式：`size_desc`(默认) / `size_asc` / `name_asc` / `name_desc` / `count_desc` |
 | `--max-depth 深度` | find_dirs 遍历深度限制（默认 20） |
 | `--deep` / `-D` | 深度扫描：更大遍历深度（50）+ 启用 `deep_only` 高级清理规则 |
 | `--export-scan PATH` | 将扫描结果导出为 JSON 文件 |
@@ -289,9 +342,9 @@ python -m pc_cleaner --validate-rules
 | 分类 key | 名称 | 风险 | 清理内容 |
 | --- | --- | --- | --- |
 | `system_temp` | 系统临时文件 | 🟢 | 用户/系统 Temp、缩略图/图标缓存、WebCache、错误报告、最近文档/跳转列表 |
-| `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA / AMD DXCache / GLCache（可安全清理并重建） |
+| `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA / AMD DXCache / GLCache + DirectX D3DSCache（可安全清理并重建） |
 | `web_cache` | 浏览器/网页缓存 | 🟢 | Edge/Chrome/Firefox/Brave/Vivaldi/Opera 缓存与 GPU 缓存、Steam htmlcache、INetCache |
-| `wechat_cache` | 微信运行缓存 | 🟢 | xplugin / radium / log / crashinfo（不动聊天数据） |
+| `wechat_cache` | 微信运行缓存 | 🟢 | 微信 4.x：`%APPDATA%\Tencent\xwechat\net` / `net_1` 网络缓存（数据目录不动） |
 | `game_caches` | 游戏平台缓存 | 🟡 | 完美世界更新包、Steam appcache / logs |
 | `dev_caches` | 开发工具缓存 | 🟡 | pnpm/pip/npm/uv/yarn/Go/cargo/NuGet/Gradle 缓存、`__pycache__`、散落工具缓存 |
 | `downloads` | 下载/旧文件 | 🔴 | Downloads 中的大文件/久未使用文件/安装包（默认隐藏） |
@@ -344,6 +397,7 @@ pc-cleaner/
 │   ├── commands.py      # 管理子命令：history / undo / checkup / 配置 / 规则 / 提权
 │   ├── ui.py            # 共享 UI 工具：输出、确认、扫描进度
 │   ├── config.py        # 配置读写（支持 PC_CLEANER_HOME 重定向）
+│   ├── env.py           # 运行环境探测（只读：浏览器/GPU/微信/Steam/pnpm/开发工具）
 │   ├── console.py       # ANSI 颜色 / CJK 对齐 / UTF-8 输出（零依赖）
 │   ├── engine.py        # 删除引擎（回收站/永久、二次防御、shred、白名单例外、回收站恢复）
 │   ├── history.py       # 清理历史 / 审计日志（--history / --undo-last）

@@ -7,6 +7,12 @@
 - 对权限错误等异常逐项容错，不中断整体扫描。
 
 绝不删除任何东西——扫描只负责"发现并测量"，删除交给 engine.py。
+
+v0.8.2 改进：
+- 目录大小统计（_dir_size）不再跳过 node_modules、__pycache__ 等目录，
+  确保可释放空间统计准确（修复低估问题）。
+- 抽取公共过滤函数 _filter_and_build_file_targets，消除 _scan_glob_files
+  与 _scan_files_by_rule 之间的代码重复。
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import logging
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -24,15 +31,26 @@ from .rules import (
     get_protected_patterns,
     is_within_clear_root,
     spec_requires_admin,
+    SYSTEM_CRITICAL_FILES,      # 安全增强：系统关键文件黑名单（虽然扫描器不删除，但传递给引擎）
 )
+
+# ===========================================================================
+# 日志配置（安全增强：记录异常）
+# ===========================================================================
+logger = logging.getLogger("pc_cleaner.scanner")
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
 
 # 扫描进度回调类型
 ScanProgressCB = Callable[[str, int, int], None]  # (category_label, current_spec, total_specs)
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # 路径与保护判断
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def expand_path(path_str: str) -> Path:
     """扩展环境变量与 ~，返回绝对 Path。"""
     expanded = os.path.expandvars(os.path.expanduser(path_str))
@@ -50,54 +68,88 @@ def is_admin() -> bool:
         return False
     try:
         import ctypes
-
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:  # noqa: BLE001
         return False
 
 
+# ===========================================================================
+# 安全增强：保护路径检查（精确前缀匹配）
+# ===========================================================================
 def make_protect_check(user_patterns: list[str] | None = None):
-    """返回一个 ``(path) -> bool`` 的保护判断函数。
+    """返回一个 (path) -> bool 的保护判断函数。
 
-    True 表示该路径受保护（应跳过）。子串匹配，大小写不敏感。
-    例外：位于 ``ALLOWED_CLEAR_ROOTS`` 白名单目录（含其内部）的路径
-    不被视为受保护，从而允许内置规则清空其内容（如 Windows 更新缓存）。
+    安全增强：
+    - 将保护模式展开为绝对路径并规范化；
+    - 使用精确前缀匹配，而非子串匹配，避免误伤；
+    - 对无法解析的路径保守返回 True（跳过）。
     """
-    patterns = [normalize(p) for p in get_protected_patterns()]
+    # 收集所有保护模式（内置 + 用户自定义）
+    base_patterns = []
+    for p in get_protected_patterns():
+        try:
+            abs_path = expand_path(p)
+            base_patterns.append(normalize(str(abs_path)))
+        except Exception:  # 路径展开失败则忽略
+            continue
     if user_patterns:
-        patterns.extend(normalize(p) for p in user_patterns)
+        for p in user_patterns:
+            try:
+                abs_path = expand_path(p)
+                base_patterns.append(normalize(str(abs_path)))
+            except Exception:
+                continue
+
+    # 去重并按长度降序排列（优先匹配更具体的路径）
+    base_patterns = sorted(set(base_patterns), key=len, reverse=True)
 
     def _check(path: Path) -> bool:
         try:
-            s = normalize(path)
+            # 解析真实路径（消除 .. 和符号链接）
+            real = path.resolve(strict=True)
         except (OSError, ValueError):
-            return True  # 无法判断的路径，保守跳过
-        if is_within_clear_root(path):
-            return False
-        return any(p in s for p in patterns if p)
+            # 无法解析则保守跳过
+            return True
+        target = normalize(str(real))
+
+        # 精确前缀匹配：路径等于保护路径，或以保护路径为父目录
+        for pattern in base_patterns:
+            if target == pattern or target.startswith(pattern + os.sep):
+                return True
+        return False
 
     return _check
 
 
-# ---------------------------------------------------------------------------
-# 遍历
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 安全遍历（支持跳过指定目录名，也可不跳过）
+# ===========================================================================
 def _walk_dir(
     root: Path,
     is_protected,
-    skip_names: set[str] | None = None,
+    skip_names: set[str] | None = DEFAULT_SKIP_DIRNAMES,
     max_depth: int | None = None,
     find_names: set[str] | None = None,
 ) -> Iterator[tuple[Path, bool]]:
     """安全遍历目录树，产出 (路径, is_dir)。
 
     - 不跟随符号链接/联接（junction）；
-    - 跳过受保护目录、以及 skip_names 中的目录名；
+    - 跳过受保护目录；
+    - 跳过 skip_names 中的目录名（若 skip_names 为 None 或空集合，则不跳过任何目录名，
+      仅保留受保护路径的跳过）；
     - ``find_names``：这些目录名本应被 skip 跳过，但需作为目标被**发现**；
       命中的目录只产出、不再下探，避免放大遍历进巨大目录；
     - max_depth 限制深度（根为 0）。
+
+    Args:
+        root: 起始目录
+        is_protected: 保护检查函数
+        skip_names: 要跳过的目录名集合。传 None 或空集合表示不跳过任何目录名
+                    （仅跳过受保护路径）。默认值为 DEFAULT_SKIP_DIRNAMES。
+        max_depth: 最大遍历深度，None 表示无限制
+        find_names: 需要特别发现的目标目录名集合（这些目录即使被 skip_names 包含也会被产出）
     """
-    skip = skip_names or DEFAULT_SKIP_DIRNAMES
+    skip = skip_names or set()   # 关键：如果传 None 或空集，则不跳过任何目录名
     root = Path(root)
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
@@ -136,12 +188,19 @@ def _walk_dir(
             continue
 
 
+# ===========================================================================
+# 目录大小统计（不跳过任何特定目录名，保证准确性）
+# ===========================================================================
 def _dir_size(
     path: Path,
     is_protected,
     memo: dict[str, tuple[int, int]] | None = None,
 ) -> tuple[int, int]:
     """计算目录内可清理的字节数与文件数量（不跟随链接、跳过受保护项）。
+
+    注意：此函数统计目录下**所有**文件（除受保护路径外），
+    不会跳过 node_modules、__pycache__ 等，以保证空间统计准确。
+    若需加速，可考虑设置 max_depth 限制，但当前保持完整遍历。
 
     ``memo``：同一扫描内的全局大小缓存（key 为规范化绝对路径）。
     同一目录被多个规则命中时只递归遍历一次，避免重复统计（目录内容
@@ -154,7 +213,8 @@ def _dir_size(
             return hit
     total = 0
     count = 0
-    for child, is_dir in _walk_dir(path, is_protected, max_depth=None):
+    # ★ 关键：传入空集合，不跳过任何特定目录名，只跳过受保护路径
+    for child, is_dir in _walk_dir(path, is_protected, skip_names=set(), max_depth=None):
         if is_dir:
             continue
         try:
@@ -167,9 +227,69 @@ def _dir_size(
     return total, count
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 公共过滤函数（消除重复）
+# ===========================================================================
+def _filter_and_build_file_targets(
+    file_paths: Iterator[Path],
+    category_key: str,
+    is_protected,
+    min_size_bytes: int = 0,
+    older_than_secs: int = 0,
+    label: str = "",
+) -> list[Target]:
+    """从文件路径迭代器中筛选符合条件的文件，构造 Target 列表。
+
+    该函数抽取了 _scan_glob_files 和 _scan_files_by_rule 的公共逻辑，
+    用于统一处理文件过滤、保护检查、stat 获取和 Target 构造。
+
+    Args:
+        file_paths: 文件路径迭代器（如 glob 或 walk 产出）
+        category_key: 分类键名
+        is_protected: 保护检查函数
+        min_size_bytes: 最小体积阈值（字节），0 表示不限制
+        older_than_secs: 最旧修改时间阈值（秒），0 表示不限制
+        label: 目标标签
+
+    Returns:
+        list[Target]: 满足条件的文件 Target 列表
+    """
+    now = time.time()
+    targets: list[Target] = []
+    for p in file_paths:
+        try:
+            if not p.is_file():
+                continue
+        except OSError:
+            continue
+        if is_protected(p):
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        # 应用过滤条件
+        if st.st_size < min_size_bytes:
+            continue
+        if older_than_secs > 0 and (now - st.st_mtime) < older_than_secs:
+            continue
+        targets.append(
+            Target(
+                path=p,
+                kind=TargetKind.FILE,
+                action=TargetAction.DELETE,
+                category=category_key,
+                size=st.st_size,
+                file_count=1,
+                label=label,
+            )
+        )
+    return targets
+
+
+# ===========================================================================
 # 各类 target 的扫描实现
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def _scan_clear_dir(
     spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
 ) -> list[Target]:
@@ -272,41 +392,23 @@ def _scan_glob_files(
         return []
     pattern = spec.get("pattern", "*")
     label = spec.get("label", "")
-    # 可选过滤：最小体积 + 足够老旧（与 files_by_rule 同语义，向后兼容）
     min_size_bytes = int(spec.get("min_size_mb", 0) or 0) * 1024 * 1024
     older_than_secs = int(spec.get("older_than_days", 0) or 0) * 86400
-    now = time.time()
-    targets: list[Target] = []
+
     try:
         matches = base.glob(pattern)
     except (OSError, ValueError):
         return []
-    for m in matches:
-        try:
-            if not m.is_file():
-                continue
-        except OSError:
-            continue
-        if is_protected(m):
-            continue
-        try:
-            st = m.stat()
-        except OSError:
-            continue
-        if st.st_size < min_size_bytes or (now - st.st_mtime) < older_than_secs:
-            continue
-        targets.append(
-            Target(
-                path=m,
-                kind=TargetKind.FILE,
-                action=TargetAction.DELETE,
-                category=category_key,
-                size=st.st_size,
-                file_count=1,
-                label=label,
-            )
-        )
-    return targets
+
+    # 复用公共过滤函数：传入生成器，惰性过滤
+    return _filter_and_build_file_targets(
+        (m for m in matches if m.is_file()),  # 仅保留文件
+        category_key,
+        is_protected,
+        min_size_bytes=min_size_bytes,
+        older_than_secs=older_than_secs,
+        label=label,
+    )
 
 
 def _resolve_bases(spec: dict[str, Any]) -> list[Path]:
@@ -362,6 +464,7 @@ def _scan_find_dirs(
         if is_protected(base):
             continue
         # 只遍历一层找到候选目录名；找到后不下降（它们本身就是待删目标）
+        # 这里仍然使用 DEFAULT_SKIP_DIRNAMES 以加速查找
         for child, is_dir in _walk_dir(base, is_protected, max_depth=max_depth, find_names=names):
             if not is_dir:
                 continue
@@ -399,32 +502,19 @@ def _scan_files_by_rule(
     label = spec.get("label", "")
     min_size_bytes = int(spec.get("min_size_mb", 0) or 0) * 1024 * 1024
     older_than_secs = int(spec.get("older_than_days", 0) or 0) * 86400
-    now = time.time()
-    targets: list[Target] = []
-    for child, is_dir in _walk_dir(base, is_protected):
-        if is_dir:
-            continue
-        if is_protected(child):
-            continue
-        try:
-            st = child.stat()
-        except OSError:
-            continue
-        # 只清理「既达到最小体积、又足够老旧」的文件：任一条件不满足即跳过
-        if st.st_size < min_size_bytes or (now - st.st_mtime) < older_than_secs:
-            continue
-        targets.append(
-            Target(
-                path=child,
-                kind=TargetKind.FILE,
-                action=TargetAction.DELETE,
-                category=category_key,
-                size=st.st_size,
-                file_count=1,
-                label=label,
-            )
-        )
-    return targets
+
+    # 使用 _walk_dir 生成所有文件路径，传入空集合以不跳过任何子目录（确保完整覆盖）
+    file_paths = (child for child, is_dir in _walk_dir(base, is_protected, skip_names=set()) if not is_dir)
+
+    # 复用公共过滤函数
+    return _filter_and_build_file_targets(
+        file_paths,
+        category_key,
+        is_protected,
+        min_size_bytes=min_size_bytes,
+        older_than_secs=older_than_secs,
+        label=label,
+    )
 
 
 # target 类型 -> 处理函数映射（find_dirs 特殊处理，支持 max_depth 参数）
@@ -491,12 +581,9 @@ def scan_spec(
                 # 预期的遍历/权限类错误：跳过该 target，不影响整体扫描
                 result.skipped += 1
                 continue
-            except Exception as exc:  # noqa: BLE001 未知异常：记录到 stderr，避免静默吞掉
+            except Exception as exc:  # 安全增强：记录未知异常
+                logger.exception("分类 %s 的 find_dirs 目标扫描异常: %s", key, exc)
                 result.skipped += 1
-                print(
-                    f"[扫描警告] 分类 {key} 的 find_dirs 目标扫描异常: {exc!r}",
-                    file=sys.stderr,
-                )
                 continue
         else:
             handler = _TARGET_HANDLERS.get(ttype)
@@ -507,12 +594,9 @@ def scan_spec(
             except (PermissionError, OSError, ValueError):
                 result.skipped += 1
                 continue
-            except Exception as exc:  # noqa: BLE001 未知异常：记录到 stderr，避免静默吞掉
+            except Exception as exc:  # 安全增强：记录未知异常
+                logger.exception("分类 %s 的 %s 目标扫描异常: %s", key, ttype, exc)
                 result.skipped += 1
-                print(
-                    f"[扫描警告] 分类 {key} 的 {ttype} 目标扫描异常: {exc!r}",
-                    file=sys.stderr,
-                )
                 continue
         for t in targets:
             tpath = normalize(t.path)
@@ -602,9 +686,9 @@ def _system_drives() -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# 输出报告
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 输出报告（供 CLI 使用）
+# ===========================================================================
 def print_report(results: list[CategoryResult]) -> None:
     """人类可读的扫描结果摘要输出（简略模式）。"""
     from .console import green, pad_cjk

@@ -35,6 +35,9 @@ v0.7 变更：
   共享 UI 工具 → ui.py（本文件保持向后兼容的导出名）；
 - 交互菜单每轮热重载 rules.json / 配置（编辑后无需重启）；
 - ``--json --dry-run``（或未给 ``--yes``）时返回 ``would_delete`` 目标预览。
+
+v0.8.1 安全增强：
+- 移除了本地 `_filters_from_args` 定义，统一由 `menu.py` 提供，避免循环导入。
 """
 
 from __future__ import annotations
@@ -59,10 +62,10 @@ from .commands import (
 from .config import load_config, save_config
 from .console import dim, red, yellow
 from .engine import CleanMode, delete_targets, empty_recycle_bin, recycle_available
-from .menu import (
+from .menu import (          # 从 menu 导入所有需要的交互函数，包括 _filters_from_args
     _apply_target_filters,
     _collect_targets,
-    _filters_from_args,
+    _filters_from_args,      # 现在由 menu 提供
     _interactive,
     _parse_ext_filter,
     _parse_selection,
@@ -233,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.deep and args.max_depth is None:
         scan_depth = max(scan_depth, 50)
 
-    # 高级清理过滤参数
+    # 高级清理过滤参数（从 menu 导入的 _filters_from_args）
     ext_filter, min_size_bytes, older_than_secs, shred_passes = _filters_from_args(args)
 
     # 是否显示进度

@@ -6,6 +6,11 @@
 
 热重载：交互菜单每轮循环重新读取配置与 rules.json（``get_enabled_category_specs``），
 编辑 ``rules.json`` / ``config.json`` 后无需重启程序，下一次扫描即生效。
+
+安全增强（v0.8.1）：
+- 扩展名过滤增加安全字符校验（仅允许字母、数字、下划线、连字符、点）。
+- 高风险操作（risky分类/回收站清空/永久删除）即使在 --yes 模式下也会强制二次确认。
+- 将 _filters_from_args 移入本模块，消除与 cli.py 的循环导入。
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from __future__ import annotations
 import shutil
 import sys
 import time
+import re  # 安全增强：扩展名校验
 from typing import Any
 
 from . import __version__
@@ -31,19 +37,20 @@ from .history import append_session, make_session, record_deletion_audit
 from .models import CategoryResult, TargetKind, format_size
 from .rules import get_enabled_category_specs
 from .scanner import is_admin, recycle_bin_size, scan_all
-from .ui import (
-    ScanProgressDisplay,
-    _echo,
-    _risk_badge,
-    prompt_yes_no,
-)
+from .ui import ScanProgressDisplay, _echo, _risk_badge, prompt_yes_no
+
+# 注意：不再从 .cli 导入任何内容，避免循环依赖
 
 
-# ---------------------------------------------------------------------------
-# 高级清理过滤（--ext / --min-size-mb / --older-than-days / --shred-passes）
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 高级清理过滤（安全增强：扩展名校验）
+# ===========================================================================
 def _parse_ext_filter(raw: str | None) -> list[str] | None:
-    """把 ``--ext`` 的值解析成小写、带点号的扩展名列表。"""
+    """把 ``--ext`` 的值解析成小写、带点号的扩展名列表。
+
+    安全增强：
+    - 仅允许字母、数字、下划线、连字符、点，其他字符将被忽略并警告。
+    """
     if not raw:
         return None
     exts: list[str] = []
@@ -53,9 +60,29 @@ def _parse_ext_filter(raw: str | None) -> list[str] | None:
             continue
         if not e.startswith("."):
             e = "." + e
+        # 安全校验：只允许 字母、数字、下划线、连字符、点
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', e):
+            _echo(yellow(f"忽略无效扩展名: {e}（仅允许字母、数字、下划线、连字符、点）"))
+            continue
         if e not in exts:
             exts.append(e)
     return exts or None
+
+
+def _filters_from_args(args) -> tuple[list[str] | None, int | None, int | None, int]:
+    """从命令行参数解析出高级清理过滤参数。
+
+    返回 ``(ext_filter, min_size_bytes, older_than_secs, shred_passes)``。
+    """
+    ext_filter = _parse_ext_filter(getattr(args, "ext", None))
+    min_size_bytes = None
+    if getattr(args, "min_size_mb", None):
+        min_size_bytes = int(args.min_size_mb) * 1024 * 1024
+    older_than_secs = None
+    if getattr(args, "older_than_days", None):
+        older_than_secs = int(args.older_than_days) * 86400
+    shred_passes = int(getattr(args, "shred_passes", 1) or 1)
+    return ext_filter, min_size_bytes, older_than_secs, shred_passes
 
 
 def _apply_target_filters(
@@ -91,25 +118,9 @@ def _apply_target_filters(
     return out
 
 
-def _filters_from_args(args) -> tuple[list[str] | None, int | None, int | None, int]:
-    """从命令行参数解析出高级清理过滤参数。
-
-    返回 ``(ext_filter, min_size_bytes, older_than_secs, shred_passes)``。
-    """
-    ext_filter = _parse_ext_filter(getattr(args, "ext", None))
-    min_size_bytes = None
-    if getattr(args, "min_size_mb", None):
-        min_size_bytes = int(args.min_size_mb) * 1024 * 1024
-    older_than_secs = None
-    if getattr(args, "older_than_days", None):
-        older_than_secs = int(args.older_than_days) * 86400
-    shred_passes = int(getattr(args, "shred_passes", 1) or 1)
-    return ext_filter, min_size_bytes, older_than_secs, shred_passes
-
-
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # 预览 / 展示
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def _preview_targets(
     targets: list[Any],
     max_lines: int = 12,
@@ -328,7 +339,6 @@ def _print_env_adaptation(env: dict[str, Any] | None = None) -> None:
     try:
         if env is None:
             from .env import probe_environment
-
             env = probe_environment(measure_wechat_size=False)
         if not isinstance(env, dict):
             return
@@ -419,9 +429,9 @@ def _print_detail_for_category(res: CategoryResult, sort_by: str = "size_desc") 
     _preview_targets(res.targets, max_lines=0, sort_by=sort_by, compact=False)
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # 用户选择解析（支持编号 / 区间 / all / none / r(回收站)）
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def _split_choice_tokens(raw: str) -> list[str]:
     """把用户输入拆成小写 token：兼容中文逗号/顿号/分号与空白分隔。"""
     norm = raw.replace("，", ",").replace("；", ",").replace("、", ",")
@@ -504,9 +514,9 @@ def _print_disk_free(results: list[CategoryResult]) -> None:
         _echo(dim("磁盘可用: " + " | ".join(parts)))
 
 
-# ---------------------------------------------------------------------------
-# 主清理流程
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 主清理流程（安全增强：高风险操作强制二次确认）
+# ===========================================================================
 def _collect_targets(selected: list[CategoryResult]) -> list[Any]:
     """把多个分类的 Target 合并为一组。"""
     out: list[Any] = []
@@ -551,7 +561,12 @@ def _run_clean_flow(
     min_size_bytes: int | None = None,
     older_than_secs: int | None = None,
 ) -> dict[str, Any]:
-    """对选中的分类执行：预览 -> 确认 -> 删除。"""
+    """对选中的分类执行：预览 -> 确认 -> 删除。
+
+    安全增强：
+    - 即使 auto_confirm=True，如果操作包含高风险分类、回收站清空、或永久删除，
+      也强制要求用户二次确认（输入 yes）。
+    """
     # 预览与删除使用同一份过滤结果，避免“预览了但没删/删了没预览”的偏差
     per_category: list[tuple[Any, list[Any]]] = []
     for res in selected:
@@ -587,19 +602,30 @@ def _run_clean_flow(
         _echo(yellow("dry-run 模式，未删除任何内容。"))
         return {"dry_run": True}
 
-    # 确认
+    # =======================================================================
+    # 安全增强：高风险操作强制二次确认（即使 --yes）
+    # =======================================================================
+    has_risky = any(r.risk == "risky" for r in selected)
+    is_permanent = mode is CleanMode.PERMANENT
+    dangerous = has_risky or empty_bin or is_permanent
+
     if not auto_confirm:
-        _echo("")
+        # 普通确认模式
         if targets:
             if not prompt_yes_no("确认删除以上内容？", default=False):
-                _echo("已取消。")
                 return {"cancelled": True}
         if empty_bin:
             if not prompt_yes_no("确认清空回收站？", default=False):
                 _echo("已取消清空回收站。")
                 empty_bin = False
+    else:
+        # --yes 模式下，仍对危险操作进行二次警示
+        if dangerous:
+            _echo(red("⚠️  警告：当前操作包含不可恢复的删除！"))
+            if not prompt_yes_no("  确认要继续吗？(输入 yes 继续)", default=False):
+                return {"cancelled": True}
 
-    # 执行
+    # 执行删除
     enable_history = bool(cfg.get("enable_history", True))
     audit_log = None
     if enable_history:
@@ -649,9 +675,9 @@ def _run_clean_flow(
     return result
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # 交互式菜单
-# ---------------------------------------------------------------------------
+# ===========================================================================
 def _interactive(
     results: list[CategoryResult],
     specs: list[dict[str, Any]],

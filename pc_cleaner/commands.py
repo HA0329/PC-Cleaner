@@ -2,6 +2,10 @@
 
 从 cli.py 拆分出来的「管理命令」模块，每个函数对应一个独立子命令，
 只做一件事，便于维护与单独测试。
+
+安全增强（v0.8.1）：
+- `_relaunch_as_admin` 在提权前设置环境变量 `PC_CLEANER_ELEVATED=1`，
+  以便新进程检测到已提权状态，在菜单中显示 `[ADMIN]` 标识。
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ import json
 import shutil
 import sys
 import time
+import os  # 安全增强：用于设置环境变量
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +36,7 @@ from .ui import ScanProgressDisplay, _admin_tag, _echo, _risk_badge
 # 历史 / 撤销
 # ---------------------------------------------------------------------------
 def _cmd_history() -> int:
+    """显示清理历史（--history）。"""
     sessions = load_history()
     if not sessions:
         _echo(yellow("暂无清理历史。"))
@@ -55,6 +61,7 @@ def _cmd_history() -> int:
 
 
 def _cmd_undo_last() -> int:
+    """恢复最近一次「进回收站」的清理（--undo-last）。"""
     sessions = load_history()
     if not sessions:
         _echo(yellow("暂无清理历史，无法撤销。"))
@@ -180,7 +187,7 @@ def _cmd_checkup(
     show_progress: bool,
     deep: bool = False,
 ) -> int:
-    """一键体检：只读汇总。"""
+    """一键体检：只读汇总各项状态。"""
     _echo(bold(f"=== PC Junk Cleaner {__version__} 体检报告 ==="))
     mode_tag = "深度 (deep)" if deep else "标准"
     _echo(dim(f"  扫描模式: {mode_tag} · 遍历深度 {scan_depth} 层"))
@@ -259,6 +266,7 @@ def _cmd_checkup(
 # 配置导入导出
 # ---------------------------------------------------------------------------
 def _cmd_export_config(path: str) -> int:
+    """导出配置到 JSON 文件。"""
     try:
         Path(path).write_text(
             json.dumps(load_config(), ensure_ascii=False, indent=2), encoding="utf-8"
@@ -271,6 +279,7 @@ def _cmd_export_config(path: str) -> int:
 
 
 def _cmd_import_config(path: str) -> int:
+    """从 JSON 文件导入配置。"""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -410,16 +419,27 @@ def _cmd_export_scan(results, path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 提权重启
+# 提权重启（安全增强：设置环境变量标记）
 # ---------------------------------------------------------------------------
 def _relaunch_as_admin(argv: list[str]) -> int:
-    """通过 UAC 以管理员身份重新启动（Windows）。"""
+    """通过 UAC 以管理员身份重新启动（Windows）。
+
+    安全增强：
+    - 在提权前设置环境变量 `PC_CLEANER_ELEVATED=1`，新进程可检测到已提权状态。
+    - 移除 `--admin` 参数，防止无限循环。
+    """
     import ctypes
 
-    args = [a for a in argv if a != "--admin"]
-    params = f"-m pc_cleaner {' '.join(args)}".strip()
+    # 移除 --admin 避免死循环
+    new_argv = [a for a in argv if a != "--admin"]
+    params = f"-m pc_cleaner {' '.join(new_argv)}".strip()
     _echo(yellow("请求管理员权限（UAC），将重新启动..."))
+
+    # 安全增强：设置环境变量，标记当前已提权
+    os.environ["PC_CLEANER_ELEVATED"] = "1"
+
     try:
+        # 使用 ShellExecuteW 以管理员身份运行
         result = ctypes.windll.shell32.ShellExecuteW(
             None, "runas", sys.executable, params, None, 1
         )

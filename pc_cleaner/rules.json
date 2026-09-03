@@ -1,7 +1,7 @@
 {
-  "version": "0.8.0",
-  "description": "PC Junk Cleaner 内置清理规则（单一数据源，按本机实测环境修订）。",
-  "note": "路径支持 Windows 环境变量（%TEMP% / %LOCALAPPDATA% / %APPDATA% / %WINDIR% / %USERPROFILE% / %SYSTEMDRIVE%）、~ 与 <CWD> 占位符；分隔符统一使用 /，运行时自动规范化。带 \"deep_only\": true 的规则只在 --deep 深度模式下启用。v0.8：按本机（Win11 + NVIDIA + Edge + 微信 4.x + pnpm store 位于 D:/.pnpm-store）实测校准：微信分类指向 4.x 布局，GPU 分类补充 DirectX(D3DSCache)。",
+  "version": "0.8.2",
+  "description": "PC Junk Cleaner 内置清理规则（基于本机实测 + 社区建议扩充）。",
+  "note": "路径支持 Windows 环境变量（%TEMP% / %LOCALAPPDATA% / %APPDATA% / %WINDIR% / %USERPROFILE% / %SYSTEMDRIVE%）、~ 与 <CWD> 占位符；分隔符统一使用 /，运行时自动规范化。带 \"deep_only\": true 的规则只在 --deep 深度模式下启用。v0.8.2：新增 Office/WPS 缓存、传递优化、CBS 日志、Docker/VS Code/Android/Unity 缓存、Adobe 媒体缓存、Zoom 缓存；优化统计精度（不再跳过 node_modules 等目录）。",
   "categories": [
     {
       "key": "system_temp",
@@ -69,10 +69,43 @@
       "key": "wechat_cache",
       "label": "微信运行缓存",
       "risk": "safe",
-      "note": "本机为微信 4.x（Weixin）：聊天记录等数据在数据目录（如 D:/WeixinShuju，含 xwechat_files），本工具绝不触碰；此处仅清理 %APPDATA%/Tencent/xwechat 下可重建的网络缓存。请在微信「设置 → 存储空间」内清理聊天数据。",
+      "note": "本机为微信 4.x（Weixin）：聊天记录等数据在数据目录（如 D:/WeixinShuju，含 xwechat_files），本工具绝不触碰；此处仅清理 %APPDATA%/Tencent/xwechat 下可重建的网络缓存。同时清理旧版 3.x 遗留的文件缓存（若存在）。请在微信「设置 → 存储空间」内清理聊天数据。",
       "targets": [
         { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/net", "label": "微信 4.x 网络缓存" },
-        { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/net_1", "label": "微信 4.x 网络缓存(2)" }
+        { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/net_1", "label": "微信 4.x 网络缓存(2)" },
+        { "type": "glob_dirs", "base": "%USERPROFILE%/Documents/WeChat Files", "pattern": "*/Cache", "action": "clear", "label": "微信 3.x 旧版文件缓存（若存在）", "deep_only": true }
+      ]
+    },
+    {
+      "key": "office_caches",
+      "label": "办公软件缓存",
+      "risk": "safe",
+      "note": "Microsoft Office 和 WPS 的本地同步缓存、临时文件，删除后软件会自动重建，不影响文档内容。",
+      "targets": [
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Microsoft/Office/16.0/OfficeFileCache", "label": "Office 文档同步缓存（OneDrive/SharePoint）", "deep_only": true },
+        { "type": "clear_dir", "path": "%APPDATA%/Kingsoft/wps/cache", "label": "WPS 缓存", "deep_only": true }
+      ]
+    },
+    {
+      "key": "media_caches",
+      "label": "多媒体设计软件缓存",
+      "risk": "safe",
+      "note": "Adobe Premiere Pro / After Effects 等软件的媒体缓存（峰值、预览），可安全删除并自动重建。",
+      "targets": [
+        { "type": "clear_dir", "path": "%APPDATA%/Adobe/Common/Media Cache", "label": "Adobe 媒体缓存", "deep_only": true },
+        { "type": "clear_dir", "path": "%APPDATA%/Adobe/Common/Media Cache Files", "label": "Adobe 媒体缓存文件", "deep_only": true }
+      ]
+    },
+    {
+      "key": "comm_caches",
+      "label": "通信工具缓存",
+      "risk": "safe",
+      "note": "Zoom、Discord、Telegram 等通信应用的临时缓存，可安全清理。",
+      "targets": [
+        { "type": "clear_dir", "path": "%APPDATA%/Zoom/cache", "label": "Zoom 会议缓存" },
+        { "type": "clear_dir", "path": "%APPDATA%/discord/Cache", "label": "Discord 缓存" },
+        { "type": "clear_dir", "path": "%APPDATA%/discord/Code Cache", "label": "Discord 代码缓存" },
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Telegram Desktop/tupdates", "label": "Telegram 更新缓存", "deep_only": true }
       ]
     },
     {
@@ -107,8 +140,10 @@
         { "type": "clear_dir", "path": "%TEMP%/WinGet", "label": "WinGet 临时安装包" },
         { "type": "find_dirs", "bases": ["<CWD>"], "names": ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"], "action": "delete", "label": "散落工具缓存" },
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/electron/Cache", "label": "Electron 缓存", "deep_only": true },
-        { "type": "clear_dir", "path": "%LOCALAPPDATA%/discord/Cache", "label": "Discord 缓存", "deep_only": true },
-        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Telegram Desktop/tupdates", "label": "Telegram 更新缓存", "deep_only": true }
+        { "type": "clear_dir", "path": "%USERPROFILE%/.docker/cache", "label": "Docker 构建缓存", "deep_only": true },
+        { "type": "clear_dir", "path": "%APPDATA%/Code/CachedData", "label": "VS Code 旧版本安装包残留", "deep_only": true },
+        { "type": "clear_dir", "path": "%USERPROFILE%/.android/cache", "label": "Android SDK 缓存", "deep_only": true },
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Unity/Editor/Cache", "label": "Unity 编辑器缓存", "deep_only": true }
       ]
     },
     {
@@ -136,7 +171,9 @@
         { "type": "clear_dir", "path": "%WINDIR%/Logs/WindowsUpdate", "label": "Windows 更新诊断日志" },
         { "type": "glob_files", "base": "%WINDIR%/System32/winevt/Logs", "pattern": "Archive-*.evtx", "label": "事件日志归档" },
         { "type": "glob_files", "base": "%WINDIR%/Minidump", "pattern": "*.dmp", "label": "系统崩溃转储" },
-        { "type": "glob_files", "base": "%WINDIR%/LiveKernelReports", "pattern": "**/*.dmp", "label": "Live 内核报告" }
+        { "type": "glob_files", "base": "%WINDIR%/LiveKernelReports", "pattern": "**/*.dmp", "label": "Live 内核报告" },
+        { "type": "clear_dir", "path": "%SYSTEMDRIVE%/ProgramData/DeliveryOptimization", "label": "Windows 传递优化(P2P)缓存", "deep_only": true },
+        { "type": "clear_dir", "path": "%WINDIR%/Logs/CBS", "label": "CBS 组件服务日志", "deep_only": true }
       ]
     },
     {

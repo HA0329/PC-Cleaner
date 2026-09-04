@@ -28,12 +28,14 @@ class TargetKind(str, Enum):
 
 
 class TargetAction(str, Enum):
-    """目录目标执行的动作。"""
+    """目录/文件目标执行的动作。"""
 
     #: 删除目录下的所有内容，但保留目录本身（适用于缓存目录，程序仍会重建）
     CLEAR = "clear"
     #: 删除目录本身（适用于 __pycache__ 等）
     DELETE = "delete"
+    #: 不删除，只对 SQLite 数据库执行 VACUUM 以释放碎片（BleachBit「整理优化数据库」）
+    COMPACT = "compact"
 
 
 @dataclass
@@ -58,6 +60,8 @@ class Target:
     @property
     def action_label(self) -> str:
         """返回动作的中文标签。"""
+        if self.action is TargetAction.COMPACT:
+            return "压缩"
         if self.kind is TargetKind.FILE:
             return "文件"
         if self.action is TargetAction.CLEAR:
@@ -67,6 +71,8 @@ class Target:
     @property
     def kind_icon(self) -> str:
         """返回目标类型的图标。"""
+        if self.action is TargetAction.COMPACT:
+            return "🧩"
         if self.kind is TargetKind.FILE:
             return "📄"
         if self.action is TargetAction.CLEAR:
@@ -75,6 +81,8 @@ class Target:
 
     def describe(self) -> str:
         """用于预览台词的简短描述。"""
+        if self.action is TargetAction.COMPACT:
+            return f"[数据库压缩] {self.path} ({self.file_count} 个文件, {self.display_size})"
         if self.kind is TargetKind.FILE:
             return f"[文件] {self.path} ({self.display_size})"
         if self.action is TargetAction.CLEAR:

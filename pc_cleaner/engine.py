@@ -12,7 +12,10 @@
 - 导入系统关键文件黑名单（SYSTEM_CRITICAL_FILES），拒绝删除。
 - 使用 path.resolve() 解析真实路径，防止 .. 和符号链接绕过。
 - 删除前重新执行保护检查（TOCTOU 防护）。
-- shred 使用 O_SYNC 和 fsync 强制物理写入。
+- 白名单清空例外（ALLOWED_CLEAR_ROOTS）：只允许清空*根目录本身*；位于白名单
+  根之下的子项视作「正在清空的内容」，允许删除（否则系统 Temp 等永远清不干净）。
+- shred 兼容 Windows：os.O_SYNC 在 Windows 上不存在，改为条件启用，并用
+  fsync 保证落盘；覆写完成后由调用方删除文件。
 - 非预期异常记录日志。
 """
 
@@ -21,6 +24,7 @@ from __future__ import annotations
 import ctypes
 import os
 import shutil
+import sqlite3
 import sys
 import logging
 from pathlib import Path
@@ -28,7 +32,11 @@ from typing import Any, Callable
 
 from .config import load_config
 from .models import CleanMode, Target, TargetAction, TargetKind, format_size
-from .rules import is_within_clear_root, SYSTEM_CRITICAL_FILES  # 安全增强
+from .rules import (
+    is_clear_root,
+    is_within_clear_root,
+    SYSTEM_CRITICAL_FILES,  # 安全增强
+)
 
 # ===========================================================================
 # 可选依赖：send2trash
@@ -68,15 +76,19 @@ def _guard_path(path: Path, is_protected, action: TargetAction) -> None:
     """删除前的二次防御：拒绝磁盘根路径、系统关键文件、受保护路径。
 
     安全增强：
-    - 首先使用 resolve(strict=True) 解析真实路径，防止 .. 和符号链接绕过。
+    - 首先使用 resolve() 解析真实路径（不要求存在），防止 .. 和符号链接绕过。
     - 检查是否系统关键文件黑名单。
     - 检查是否磁盘根。
-    - 白名单清空目录（ALLOWED_CLEAR_ROOTS）只允许以 CLEAR 方式处理。
-    - 受保护路径匹配使用传入的 is_protected 函数（基于精确前缀匹配）。
+    - 白名单清空目录（ALLOWED_CLEAR_ROOTS）：
+        * CLEAR 动作：允许清空内容；
+        * DELETE 动作：仅当路径**恰好等于**某个白名单根目录时拒绝删除目录本身；
+        * 白名单根之下的子项 = 「正在被清空的内容」，放行交给后续删除
+          （否则 C:\\Windows\\Temp 等白名单目录会永远清不干净）。
+    - 受保护路径匹配使用传入的 is_protected 函数。
     """
-    # 1. 解析真实路径（防止 .. 和符号链接）
+    # 1. 解析真实路径（防止 .. 和符号链接）；不要求路径存在，避免误伤
     try:
-        real = path.resolve(strict=True)
+        real = path.resolve(strict=False)
     except (OSError, ValueError):
         raise PermissionError(f"无法解析路径: {path}")
 
@@ -88,55 +100,58 @@ def _guard_path(path: Path, is_protected, action: TargetAction) -> None:
     if real.name.lower() in SYSTEM_CRITICAL_FILES:
         raise PermissionError(f"拒绝删除系统关键文件: {real}")
 
-    # 4. 白名单清空例外（只允许 CLEAR）
+    # 4. 白名单清空例外（只允许清空内容；禁止删除白名单根目录本身）
     if is_within_clear_root(real):
         if action is TargetAction.CLEAR:
             return  # 允许清空内容
-        raise PermissionError(f"白名单目录只允许清空内容，拒绝删除整个目录: {real}")
+        if is_clear_root(real):
+            raise PermissionError(f"白名单目录只允许清空内容，拒绝删除整个目录: {real}")
+        return  # 白名单根之下的子项：属于被清空的内容，放行
 
-    # 5. 受保护路径检查（精确前缀匹配）
+    # 5. 受保护路径检查
     if is_protected(real):
         raise PermissionError(f"受保护路径，拒绝删除: {real}")
 
 
 # ===========================================================================
-# 文件覆写（shred）增强
+# 文件覆写（shred）
 # ===========================================================================
 def _shred_file(path: Path, passes: int = 1) -> None:
-    """多遍随机覆写后删除（增强：强制同步落盘）。
+    """多遍随机覆写文件内容（不删除文件，删除由调用方负责）。
 
-    使用 os.O_SYNC 确保每次写入都立即物理写入磁盘，
-    并显式调用 os.fsync 增强可靠性。
+    Windows 兼容：``os.O_SYNC`` 在 Windows 上不存在，因此仅在平台提供时
+    启用，并统一调用 ``os.fsync`` 强制物理落盘，保证覆写可靠性。
 
-    passes：覆写遍数（默认 1，上限 7）。失败时不阻断删除。
+    passes：覆写遍数（默认 1，上限 7）。覆写失败抛 OSError/PermissionError，
+    由调用方决定是否仍然删除文件。
     """
     if passes < 1:
         passes = 1
     passes = min(passes, 7)
+    size = path.stat().st_size
+    # Windows 上 os.open 必须显式加 O_BINARY，否则随机字节里的 \n 会被翻译成
+    # \r\n 导致文件变长；POSIX 无此标志。
+    flags = os.O_RDWR
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_SYNC"):  # POSIX 可用；Windows 无此标志
+        flags |= os.O_SYNC
+    fd = os.open(str(path), flags)
     try:
-        size = path.stat().st_size
-        # 以 O_SYNC 模式打开文件，保证写入落盘
-        fd = os.open(str(path), os.O_RDWR | os.O_SYNC)
-        try:
-            for _ in range(passes):
-                os.lseek(fd, 0, os.SEEK_SET)
-                remaining = size
-                chunk = 1024 * 1024  # 1MB 块
-                while remaining > 0:
-                    n = min(chunk, remaining)
-                    os.write(fd, os.urandom(n))
-                    remaining -= n
-                os.fsync(fd)   # 再次显式同步
-        finally:
-            os.close(fd)
-        # 覆写完成后删除文件
-        os.remove(str(path))
-    except (OSError, PermissionError):
-        # 若覆写失败，尝试普通删除（避免留下文件）
-        try:
-            os.remove(str(path))
-        except OSError:
-            pass
+        for _ in range(passes):
+            os.lseek(fd, 0, os.SEEK_SET)
+            remaining = size
+            chunk = 1024 * 1024  # 1MB 块
+            while remaining > 0:
+                n = min(chunk, remaining)
+                os.write(fd, os.urandom(n))
+                remaining -= n
+            try:
+                os.fsync(fd)
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
 
 
 # ===========================================================================
@@ -159,7 +174,7 @@ def _delete_path(
     """
     # 重新解析真实路径
     try:
-        real = path.resolve(strict=True)
+        real = path.resolve(strict=False)
     except (OSError, ValueError):
         raise PermissionError(f"无法解析路径: {path}")
 
@@ -191,7 +206,12 @@ def _delete_path(
         shutil.rmtree(str(real), ignore_errors=False)
     else:
         if shred:
-            _shred_file(real, passes=shred_passes)
+            # 先覆写内容，再删除文件（覆写失败仍尝试删除，避免留下文件）
+            try:
+                _shred_file(real, passes=shred_passes)
+            except OSError:
+                pass
+            os.remove(str(real))
         else:
             os.remove(str(real))
 
@@ -211,8 +231,11 @@ def _clear_dir_content(
     """
     try:
         for child in path.iterdir():
-            # 防御：清空时逐个跳过受保护子项（如缓存目录里混入的联接/用户数据）
-            if is_protected(child):
+            # 防御：清空时逐个跳过受保护子项（如缓存目录里混入的联接/用户数据）。
+            # 例外：位于白名单清空根（ALLOWED_CLEAR_ROOTS）之下的子项属于
+            # 「正在被清空的内容」，即使命中了名称级保护（如外层 .git）也应放行，
+            # 交由 _delete_path 的守卫做最终裁决。
+            if is_protected(child) and not is_within_clear_root(child):
                 continue
             try:
                 child_is_dir = child.is_dir()
@@ -279,7 +302,12 @@ def delete_targets(
             # 首先调用 _guard_path 进行初步检查（使用原始路径，但内部会 resolve）
             _guard_path(t.path, is_protected, t.action)
 
-            if t.kind is TargetKind.FILE:
+            if t.action is TargetAction.COMPACT:
+                # 数据库压缩：VACUUM 重写文件，不删除数据
+                freed_here = compact_database(t.path)
+                freed += freed_here
+                audit(t.path, t.size, "compact")
+            elif t.kind is TargetKind.FILE:
                 _delete_path(
                     t.path,
                     mode,
@@ -344,6 +372,37 @@ def _dir_size_now(path: Path) -> int:
     except OSError:
         pass
     return total
+
+
+# ===========================================================================
+# SQLite 数据库压缩（BleachBit「整理优化数据库」）
+# ===========================================================================
+def compact_database(path: Path) -> int:
+    """对 SQLite 数据库执行 VACUUM 以释放碎片，返回释放的字节数。
+
+    - **不删除数据**，只重写文件去掉空闲页，浏览器会在下次运行时重建索引；
+    - 数据库被占用 / 非 SQLite / 只读时抛 PermissionError，安全跳过；
+    - 使用 autocommit（isolation_level=None），避免 VACUUM 被隐式事务包裹而失败。
+    """
+    try:
+        before = path.stat().st_size
+    except OSError:
+        raise PermissionError(f"无法访问数据库: {path}")
+    try:
+        con = sqlite3.connect(str(path), isolation_level=None)
+        try:
+            con.execute("VACUUM")
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        raise PermissionError(f"数据库压缩失败（可能被占用或非 SQLite）: {exc}")
+    except OSError as exc:
+        raise PermissionError(f"数据库压缩失败: {exc}")
+    try:
+        after = path.stat().st_size
+    except OSError:
+        after = before
+    return max(before - after, 0)
 
 
 # ===========================================================================

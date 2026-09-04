@@ -47,8 +47,14 @@ SYSTEM_CRITICAL_FILES = {
 # ===========================================================================
 # 受保护路径（黑名单）——匹配即跳过，绝不删除
 # ===========================================================================
-# 注意：这些是**模式字符串**，会被展开为绝对路径并进行**精确前缀匹配**，
-# 而非简单的子串匹配，从而避免误伤（如 "windows" 误匹配 "windows.old"）。
+# 匹配语义（见 scanner.make_protect_check）：
+# - 含环境变量 / `~` / 盘符 / 绝对形式的条目 → 展开后做**绝对路径前缀匹配**；
+# - 其余相对条目（如 `windows\system32`、`weixinshuju`、`.git`）→ 按**路径组件
+#   （目录名序列）全等匹配**，命中任意一层即视为受保护，例如 `windows\system32`
+#   可命中 C:/Windows/System32 下的任意子路径，`.git` 可命中任意位置的项目仓库。
+#   组件级全等匹配不会像子串匹配那样误伤（如 "windows" 不会误匹配 "windows.old"）。
+# - 白名单清空例外（ALLOWED_CLEAR_ROOTS）内的路径不在此受保护（见
+#   is_within_clear_root / is_clear_root），仍由引擎对根目录的删除做拦截。
 DEFAULT_PROTECTED_PATTERNS: list[str] = [
     r"$recycle.bin",
     r"system volume information",
@@ -139,6 +145,24 @@ def is_within_clear_root(path) -> bool:
     return False
 
 
+def is_clear_root(path) -> bool:
+    """路径是否**恰好等于**某个允许清空的白名单根目录本身。
+
+    用于引擎守卫区分「删除白名单根目录本身」（禁止）与「清空其内容 /
+    删除其下的子项」（允许）。
+    """
+    s = _resolve_root(str(path))
+    if s is None:
+        return False
+    for root in ALLOWED_CLEAR_ROOTS:
+        r = _resolve_root(root)
+        if r is None:
+            continue
+        if s == r:
+            return True
+    return False
+
+
 # ===========================================================================
 # 分类元信息（用于展示和标签）
 # ===========================================================================
@@ -202,6 +226,16 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
         "label": "浏览器隐私数据(高风险)",
         "description": "Cookie 与浏览历史（会退出登录，仅显式开启时清理）",
         "risk": "risky",
+    },
+    "browser_data": {
+        "label": "浏览器站点数据(高风险)",
+        "description": "DOM/本地存储、会话、站点偏好、登录/表单数据、搜索引擎与同步数据（会退出登录并重置站点设置，默认隐藏）",
+        "risk": "risky",
+    },
+    "database_compact": {
+        "label": "浏览器数据库压缩",
+        "description": "对浏览器的 History/Web Data/Login Data/Cookies/places.sqlite 等 SQLite 数据库执行 VACUUM 释放碎片（不删除数据，安全）",
+        "risk": "safe",
     },
 }
 
@@ -358,8 +392,9 @@ VALID_TARGET_TYPES: set[str] = {
     "glob_files",
     "files_by_rule",
     "find_dirs",
+    "compact_db",  # 对 SQLite 数据库执行 VACUUM 压缩（不删除，BleachBit「整理优化数据库」）
 }
-# 合法的目录动作
+# 合法的目录/文件动作
 VALID_ACTIONS: set[str] = {"clear", "delete"}
 
 
@@ -407,6 +442,11 @@ def validate_rules(specs: list[dict[str, Any]] | None = None) -> list[str]:
                 errors.append(f"{loc} 缺少 path")
             if ttype in ("glob_dirs", "glob_files", "files_by_rule") and not t.get("base"):
                 errors.append(f"{loc} 缺少 base")
+            if ttype == "compact_db":
+                if not t.get("base"):
+                    errors.append(f"{loc} 缺少 base")
+                if not t.get("pattern"):
+                    errors.append(f"{loc} 缺少 pattern")
             if ttype == "find_dirs":
                 if not t.get("bases"):
                     errors.append(f"{loc} 缺少 bases")

@@ -13,6 +13,12 @@ v0.8.2 改进：
   确保可释放空间统计准确（修复低估问题）。
 - 抽取公共过滤函数 _filter_and_build_file_targets，消除 _scan_glob_files
   与 _scan_files_by_rule 之间的代码重复。
+
+v0.8.3 修复（安全）：
+- make_protect_check 改为两层匹配：绝对/环境变量模式做前缀匹配；相对模式
+  （windows\\system32、weixinshuju、.git 等）按路径组件全等匹配任意层——
+  修复旧实现把相对模式展开成"相对当前工作目录"导致真实系统路径失去保护。
+- 白名单清空根内的路径放行；不再对不存在的路径一律保守拒绝。
 """
 
 from __future__ import annotations
@@ -74,48 +80,106 @@ def is_admin() -> bool:
 
 
 # ===========================================================================
-# 安全增强：保护路径检查（精确前缀匹配）
+# 安全增强：保护路径检查
 # ===========================================================================
+def _path_components(s: str) -> list[str]:
+    """把路径拆成小写组件列表（按 / 与 \\ 分割），用于组件级全等匹配。"""
+    parts = str(s).replace("/", os.sep).split(os.sep)
+    return [p.lower() for p in parts if p and p not in (".",)]
+
+
+def _contains_sequence(target: list[str], pattern: list[str]) -> bool:
+    """target 组件序列是否连续包含 pattern 组件序列（全等匹配）。"""
+    if not pattern:
+        return False
+    n = len(target)
+    m = len(pattern)
+    for i in range(n - m + 1):
+        if target[i : i + m] == pattern:
+            return True
+    return False
+
+
+def _is_abs_style_pattern(pattern: str) -> bool:
+    """模式是否为「绝对/环境变量」形态（应展开为绝对前缀），
+    而不是相对的系统路径片段 / 目录名（应做组件级全等匹配）。
+
+    注意：单个前导反斜杠（如内置的 ``\\.git`` 片段）**不是**绝对路径，
+    不应被当成 UNC/根路径处理。
+    """
+    p = pattern.strip()
+    if not p:
+        return False
+    if "%" in p or p.startswith("~"):
+        return True
+    if len(p) >= 2 and p[0].isalpha() and p[1] == ":" and p[2:3] in ("\\", "/"):
+        return True
+    # UNC 路径（\\server\share）才算绝对；单反斜杠开头只是路径片段
+    return p.startswith("\\\\")
+
+
 def make_protect_check(user_patterns: list[str] | None = None):
     """返回一个 (path) -> bool 的保护判断函数。
 
-    安全增强：
-    - 将保护模式展开为绝对路径并规范化；
-    - 使用精确前缀匹配，而非子串匹配，避免误伤；
-    - 对无法解析的路径保守返回 True（跳过）。
+    安全增强（v0.8.3 修复）：
+    - 两层匹配语义：
+        1) 含环境变量 / ``~`` / 盘符 / 绝对形式的模式 → 展开为规范化绝对路径，
+           做**前缀匹配**（等于或以之为父目录）；
+        2) 其余相对模式（如 ``windows\\system32``、``weixinshuju``、``.git``）
+           → 按**路径组件（目录名序列）全等匹配**，命中任意一层即受保护。
+           这修复了旧实现把相对模式展开成"相对当前工作目录"导致
+           System32 / 微信数据目录等真实路径完全失去保护的问题；
+           组件全等不会像子串那样误伤（"windows" 不会误匹配 "windows.old"）。
+    - 白名单清空根（ALLOWED_CLEAR_ROOTS）内的路径放行（其内容可被清空）；
+    - 不做 strict resolve：路径不存在时按字面组件参与匹配，避免
+      "无法解析 → 一律保守拒绝" 造成误伤（如把普通临时路径当受保护）。
     """
-    # 收集所有保护模式（内置 + 用户自定义）
-    base_patterns = []
-    for p in get_protected_patterns():
+    # 绝对前缀模式（env / ~ / 盘符 / 绝对路径）
+    prefixes: list[str] = []
+    # 相对模式 → 组件序列（内置的相对系统路径片段 + 名称级保护）
+    name_patterns: list[list[str]] = []
+    raw_patterns = list(get_protected_patterns())
+    if user_patterns:
+        raw_patterns.extend(str(p) for p in user_patterns)
+
+    for p in raw_patterns:
+        p = p.strip()
+        if not p:
+            continue
         try:
-            abs_path = expand_path(p)
-            base_patterns.append(normalize(str(abs_path)))
+            if _is_abs_style_pattern(p):
+                prefixes.append(normalize(str(expand_path(p))))
+            else:
+                comps = _path_components(p)
+                if comps:
+                    name_patterns.append(comps)
         except Exception:  # 路径展开失败则忽略
             continue
-    if user_patterns:
-        for p in user_patterns:
-            try:
-                abs_path = expand_path(p)
-                base_patterns.append(normalize(str(abs_path)))
-            except Exception:
-                continue
 
     # 去重并按长度降序排列（优先匹配更具体的路径）
-    base_patterns = sorted(set(base_patterns), key=len, reverse=True)
+    prefixes = sorted(set(prefixes), key=len, reverse=True)
 
     def _check(path: Path) -> bool:
         try:
-            # 解析真实路径（消除 .. 和符号链接）
-            real = path.resolve(strict=True)
-        except (OSError, ValueError):
-            # 无法解析则保守跳过
+            target = normalize(str(path))
+        except Exception:  # noqa: BLE001 无法转字符串则保守拒绝
             return True
-        target = normalize(str(real))
 
-        # 精确前缀匹配：路径等于保护路径，或以保护路径为父目录
-        for pattern in base_patterns:
+        # 白名单清空根内的路径不受保护（内容允许被清空，根目录本身由引擎拦截）
+        if is_within_clear_root(target):
+            return False
+
+        # 1) 绝对前缀匹配
+        for pattern in prefixes:
             if target == pattern or target.startswith(pattern + os.sep):
                 return True
+
+        # 2) 相对模式：组件级全等匹配（命中任意层即受保护）
+        if name_patterns:
+            tokens = _path_components(target)
+            for pat in name_patterns:
+                if _contains_sequence(tokens, pat):
+                    return True
         return False
 
     return _check
@@ -517,6 +581,54 @@ def _scan_files_by_rule(
     )
 
 
+def _scan_compact_db(
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
+) -> list[Target]:
+    """扫描 SQLite 数据库文件，构造 COMPACT（压缩）目标。
+
+    对应 BleachBit「整理优化数据库」：对浏览器 History / Web Data / Login Data /
+    Cookies / places.sqlite 等执行 VACUUM 释放碎片，**不删除数据**。
+    引擎侧通过 :func:`engine.compact_database` 执行。
+    """
+    base_str = spec.get("base", "")
+    if not base_str:
+        return []
+    base = expand_path(base_str)
+    if not base.exists() or not base.is_dir():
+        return []
+    pattern = spec.get("pattern", "*")
+    label = spec.get("label", "")
+    try:
+        matches = base.glob(pattern)
+    except (OSError, ValueError):
+        return []
+    targets: list[Target] = []
+    for m in matches:
+        try:
+            if not m.is_file():
+                continue
+        except OSError:
+            continue
+        if is_protected(m):
+            continue
+        try:
+            st = m.stat()
+        except OSError:
+            continue
+        targets.append(
+            Target(
+                path=m,
+                kind=TargetKind.FILE,
+                action=TargetAction.COMPACT,
+                category=category_key,
+                size=st.st_size,
+                file_count=1,
+                label=label,
+            )
+        )
+    return targets
+
+
 # target 类型 -> 处理函数映射（find_dirs 特殊处理，支持 max_depth 参数）
 _TARGET_HANDLERS = {
     "clear_dir": _scan_clear_dir,
@@ -524,6 +636,7 @@ _TARGET_HANDLERS = {
     "glob_dirs": _scan_glob_dirs,
     "glob_files": _scan_glob_files,
     "files_by_rule": _scan_files_by_rule,
+    "compact_db": _scan_compact_db,
 }
 
 
@@ -581,8 +694,9 @@ def scan_spec(
                 # 预期的遍历/权限类错误：跳过该 target，不影响整体扫描
                 result.skipped += 1
                 continue
-            except Exception as exc:  # 安全增强：记录未知异常
+            except Exception as exc:  # 安全增强：记录未知异常（控制台 + 日志）
                 logger.exception("分类 %s 的 find_dirs 目标扫描异常: %s", key, exc)
+                print(f"[扫描警告] 分类 {key} 的 find_dirs 目标扫描异常: {exc}", file=sys.stderr)
                 result.skipped += 1
                 continue
         else:
@@ -594,8 +708,9 @@ def scan_spec(
             except (PermissionError, OSError, ValueError):
                 result.skipped += 1
                 continue
-            except Exception as exc:  # 安全增强：记录未知异常
+            except Exception as exc:  # 安全增强：记录未知异常（控制台 + 日志）
                 logger.exception("分类 %s 的 %s 目标扫描异常: %s", key, ttype, exc)
+                print(f"[扫描警告] 分类 {key} 的 {ttype} 目标扫描异常: {exc}", file=sys.stderr)
                 result.skipped += 1
                 continue
         for t in targets:
@@ -619,6 +734,9 @@ def scan_all(
     ``recycle_bin`` 由 CLI 特殊处理，不在此扫描。
     跨分类做全局去重：同一路径出现在多个分类时只保留第一次出现的 Target，
     且共享同一个目录大小缓存（``_dir_size`` 对同一目录只递归遍历一次）。
+    例外：**COMPACT（数据库压缩）目标不参与删除类去重** —— 压缩与删除是两种
+    不同意图，用户可能只选 ``database_compact`` 而删除类分类先行占用了同一路径，
+    此时应保留 COMPACT 目标（对 COMPACT 自身单独去重即可）。
     ``scan_depth``：find_dirs 遍历深度限制（默认 20 层）。
     ``on_progress``：扫描进度回调 (category_label, current_idx, total)。
     """
@@ -626,6 +744,7 @@ def scan_all(
     size_memo: dict[str, tuple[int, int]] = {}
     results: list[CategoryResult] = []
     seen_paths: set[str] = set()
+    seen_compact: set[str] = set()
     total = len(specs)
     for idx, spec in enumerate(specs, start=1):
         if spec.get("key") == "recycle_bin":
@@ -641,9 +760,14 @@ def scan_all(
         deduped: list[Target] = []
         for t in res.targets:
             key = normalize(t.path)
-            if key in seen_paths:
-                continue
-            seen_paths.add(key)
+            if t.action is TargetAction.COMPACT:
+                if key in seen_compact:
+                    continue
+                seen_compact.add(key)
+            else:
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
             deduped.append(t)
         res.targets = deduped
         results.append(res)

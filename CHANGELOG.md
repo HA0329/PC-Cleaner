@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.0 (2026-09)
+
+### 吸收 BleachBit + Dism++（借鉴两者能力）
+- **新增 `browser_data`（高风险，默认隐藏）**：BleachBit 的 Edge/Chrome/Firefox
+  站点数据 —— DOM/本地存储与会话存储、会话、表单历史、登录密码、默认搜索引擎、
+  站点偏好/权限、同步数据。删除会退出登录并重置站点设置，清理前请先退出浏览器。
+- **新增 `database_compact`（安全）**：BleachBit「整理优化数据库」—— 新增
+  `compact_db` 目标类型，用 SQLite `VACUUM` 对浏览器 History / Web Data /
+  Login Data / Cookies / places.sqlite 等库重写以释放碎片，**不删除数据**；
+  引入新引擎函数 `engine.compact_database()`（autocommit 下 VACUUM，库被占用/
+  只读时安全跳过，跨分类去重时 COMPACT 目标独立保留，避免被删除类分类抢占）。
+- **扩展 `system_admin`**（Dism++「空间回收」补充）：Windows 事件日志
+  `%WINDIR%\System32\winevt\Logs\*.evtx`、崩溃内存转储 `%WINDIR%\MEMORY.DMP`、
+  `.NET 原生映像缓存 `%WINDIR%\assembly\NativeImages_*`（deep_only，可重建）。
+- **扩展 `browser_privacy`**：补充 Edge/Chrome 新版 Cookie 路径 `*/Network/Cookies`
+  与 Firefox 历史图标 `favicons.sqlite`。
+- **非文件 / 系统级项**（MUICache、Run 历史、Shellbags、系统还原点、被取代的
+  WinSxS、释放磁盘空闲区域等）已在 `rules.json` 顶部 `manual_notes` 说明，
+  由系统自带工具/注册表处理，本工具不伪造路径。
+- 版本号统一为 0.9.0；新增 `tests/test_v09.py`（4 个用例覆盖 compact_db）。
+
 ## 0.8.0 (2026-09)
 
 ### 本机实测适配（结合实际电脑重新校准）

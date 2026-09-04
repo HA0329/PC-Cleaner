@@ -1,218 +1,113 @@
 # 🧹 PC Junk Cleaner
 
 > 为**个人电脑**定制的安全垃圾清理工具（Windows 优先）。
-> 交互式菜单 · 先预览后确认 · 删除可进回收站 · 二次防御防误删 · 风险分级 · 可撤销 · 审计日志。
+> 先预览后确认 · 删除可进回收站 · 二次防御防误删· 风险分级 · 可撤销 · 审计日志。
 
-一个以**安全为第一优先级**的垃圾清理程序：它不会直接删东西，而是先扫描、
-告诉你每个分类能释放多少空间、列出将删除的文件，**经你确认后**才动手。
-默认可以删除到回收站（可恢复），并且内置了受保护路径保护与删除前二次防御。
+一个以**安全为第一优先级**的垃圾清理程序：它不会直接删东西，而是先扫描、告诉你每个分类
+能释放多少空间、列出将删除的文件，**经你确认后**才动手。默认删除到回收站（可恢复），内置
+受保护路径黑名单与删除前二次防御。
 
-## [v0.8.2] - 2026-09-03
-
-### 改进
-- **更准确的目录大小统计**：`_dir_size` 现在不再跳过 `node_modules`、`__pycache__` 等子目录，确保可释放空间统计更加精确（修复了之前低估空间的问题）。
-- **代码去重**：抽取公共过滤函数 `_filter_and_build_file_targets`，消除了 `_scan_glob_files` 与 `_scan_files_by_rule` 之间的重复逻辑，提升可维护性。
-
-### 性能
-- 目录大小缓存（`size_memo`）继续保持跨分类共享，避免重复遍历同一目录。
-
-### 安全
-- 所有统计仍严格遵守受保护路径黑名单，不影响安全防护。
-
-v0.8 升级（本机实测适配 · 更好的交互）：
-
-- **运行环境自适应探测**（新增 `env.py`，只读）：自动识别本机实际安装的浏览器
-  （Edge/Chrome/Firefox/Brave/Vivaldi/Opera）、GPU 厂商、微信布局（3.x/4.x）
-  与**微信数据目录**、Steam 库、pnpm store 实际位置、PATH 开发工具。
-- **`--checkup` 新增「运行环境适配」小节** + 交互菜单顶部「本机适配」一行：
-  这台机器装了什么一目了然；微信数据目录（如本机 `D:\WeixinShuju`）会提示
-  "请在微信内清理"，工具绝不触碰聊天数据。
-- **微信缓存分类修正为微信 4.x**：只清 `%APPDATA%\Tencent\xwechat\net` /
-  `net_1`（4.x 实际存在的网络缓存），删除 3.x 时期已不存在的死路径。
-- **GPU 分类补充 DirectX 着色器缓存**（`%LOCALAPPDATA%\D3DSCache`）。
-- **交互菜单更好用**：汇总表即菜单，只给"有内容"的分类编号；输入 `r` 即可连
-  回收站一起清（修复了菜单印着 `r. 回收站` 却无法输入的断头热键）；支持区间
-  选择（`1,3-5`、`2-4 r`）；排序补齐 `name_desc`。
-- **预览与删除同源**：预览展示的是过滤（`--ext/--min-size-mb/--older-than-days`）
-  后真正会删的内容，不再"预览一套、删除另一套"。
-
-v0.7 升级（交互菜单热重载 & 模块拆分）：
-
-- **交互菜单热重载**：每轮循环重新读取 `rules.json` 与 `config.json`，编辑后
-  无需重启，下一次扫描即生效。
-- **模块拆分**：`cli.py` 瘦身为参数解析 + 主流程 + JSON 输出；交互菜单 → `menu.py`，
-  管理子命令（history/undo/checkup/配置/规则/提权）→ `commands.py`，共享 UI →
-  `ui.py`；`--json --dry-run` 可返回 `would_delete` 目标预览。
-- **安全加固**：白名单清空目录与系统盘解耦（`%WINDIR%` 动态解析）、回收站
-  `$I` 元数据容错、扫描错误分级记录、同一目录跨分类只统计一次（性能）。
-
-v0.5 升级（目录显示增强 & 扫描优化）：
-
-- **`--detail` 详细展示**：完整展示每个分类下的所有目标目录/文件，不再截断；交互菜单中可按 `d` 查看单个或全部详情。
-- **`--tree` 树形视图**：以树形结构展示扫描结果，直观呈现目录层级关系。
-- **`--sort` 排序方式**：支持按体积、名称、文件数排序，交互菜单中可按 `s` 快速切换。
-- **可配置扫描深度**：新增 `--max-depth` 参数和 `scan_depth` 配置项，`find_dirs` 默认深度从 12 提升至 20 层。
-- **扫描进度提示**：扫描时实时显示进度条，可通过 `--no-progress` 关闭。
-- **`--export-scan`**：将扫描结果导出为 JSON 文件，便于离线分析或存档。
-- **交互式菜单增强**：新增 `d`（详细）、`t`（树形）、`s`（切换排序）命令，汇总表格式优化。
-
-v0.6 升级（清理规则外置 & 高级清理模式）：
-
-- **`rules.json` 规则外置**：内置清理规则迁移到随包附带的 `pc_cleaner/rules.json`
-  （单一数据源），路径用环境变量占位符表达，可直接编辑、审阅与替换，无需改代码。
-- **`--deep` 深度扫描**：更大遍历深度 + 启用 `deep_only` 附加缓存规则（Service Worker /
-  DawnCache / Electron / Discord / Telegram / Windows 图标字体缓存等）。
-- **高级过滤**：`--ext` 按扩展名、`--min-size-mb` 按最小体积、`--older-than-days`
-  按最旧修改时间筛选清理目标；`--shred-passes N` 设置安全擦除遍数。
-
-v0.4 升级（借鉴系统自带的经典 `clean.bat` 垃圾清理脚本）：
-
-- **补齐系统 Temp**：新增清理 `C:\Windows\Temp`（之前只清用户 Temp），
-  通过白名单清空例外实现——只清空内容、保留目录，删除目录本身仍被拒绝。
-- **最近文档/跳转列表**：清空 `%APPDATA%\Microsoft\Windows\Recent`，
-  对应 clean.bat 的 `del %userprofile%\recent\*.*`（现代路径，不影响文件本身）。
-- **chkdsk 残留**：删除卷根目录的 `found.000/found.001` 等磁盘扫描碎片目录
-  （clean.bat 只做全盘递归 `*.chk`，这里改为**只删 found.* 目录本身**，更安全）。
-- **更新日志与备份残留**：清理 `%WINDIR%\KB*.log` 更新日志、`%WINDIR%` 顶层
-  `*.bak` 备份残留、`%WINDIR%\Logs\WindowsUpdate` 诊断日志。
-- 全部沿用既有安全模型：需管理员、先预览后确认、逐项容错、保护路径拦截。
-
-v0.3 升级（借鉴 GitHub 开源清理工具）：
-
-- **风险分级**（借鉴 [windows-cleaner-cli](https://github.com/guhcostan/windows-cleaner-cli)）：
-  分类标记 🟢 安全 / 🟡 一般 / 🔴 高风险；高风险分类默认隐藏，需 `--risky` 或
-  配置 `show_risky` 才显示，`--all` 也不会包含它们。
-- **审计日志 + 清理历史**（借鉴 [sifty](https://github.com/Vortrix5/sifty)）：
-  每次清理都记录到 `history.json` / `audit.log`，`--history` 可查，
-  `--undo-last` 可从回收站**恢复**最近一次清理。
-- **管理员深度清理**（借鉴 sifty / [WinPurge](https://github.com/ql0ud/WinPurge)）：
-  Windows 更新缓存、预读取、事件日志归档、系统崩溃转储；未提权自动跳过，
-  `--admin` 一键 UAC 提权。
-- **更多清理细节**：Brave / Vivaldi / Opera 缓存、图标缓存、NuGet / Gradle /
-  Go 模块缓存、下载目录安装包；受保护路径下通过**白名单清空**安全清理更新缓存。
-- **安全擦除**（借鉴 BleachBit / KCleaner）：`--shred` 永久删除前随机覆写一遍。
-- **一键体检**（借鉴 sifty `checkup`）与**配置导入导出**（借鉴 Win11Debloat）。
-
----
-
-## 📌 本机实测（2026-09 · 按实际电脑探测结果定制）
-
-> 工具启动时会**自动探测**本机实际安装的浏览器 / GPU / 微信 / Steam / pnpm store
-> 等（见下方「运行环境」），只清真正存在的内容，未安装软件的缓存分类自动显示为空。
-
-| 分类 key | 名称 | 风险 | 本机实际命中（探测结果） |
-| --- | --- | --- | --- |
-| `system_temp` | 系统临时文件 | 🟢 | 用户 Temp、Edge WebCache、缩略图/图标缓存、最近文档等 ≈ 43 MB |
-| `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA RTX 3060 → DXCache / GLCache + DirectX D3DSCache |
-| `web_cache` | 浏览器/网页缓存 | 🟢 | 本机只有 **Edge**（其余浏览器未安装）≈ 63 MB |
-| `wechat_cache` | 微信运行缓存 | 🟢 | **微信 4.x**（Weixin）：roaming `xwechat\net\net_1` ≈ 2 MB |
-| `game_caches` | 游戏平台缓存 | 🟡 | Steam 装在 `D:\Program Files (x86)\Steam`，缓存当前为空 |
-| `dev_caches` | 开发工具缓存 | 🟡 | **pnpm store `D:\.pnpm-store` ≈ 1.4 GB** + `pnpm-cache` ≈ 322 MB |
-| `downloads` | 下载/旧文件 | 🔴 | Downloads 当前为空（默认隐藏） |
-| `system_admin` | 系统深度清理 | 🟡 | Windows\Temp、更新缓存等 ≈ 1 MB（需管理员，已提权） |
-| `windows_old` | 旧版 Windows 残留 | 🔴 | 不存在（默认隐藏，需管理员） |
-| `dev_purge` | 项目构建产物 | 🔴 | 需在对应工作目录运行才有命中（默认隐藏） |
-| `browser_privacy` | 浏览器隐私数据 | 🔴 | Edge 的 Cookie/History（默认隐藏，会退出登录） |
-
-> ⚠️ **微信数据目录（本机 `D:\WeixinShuju`，约 13.7 GB）不在清理范围内**：它含聊天
-> 记录等用户数据，本工具的黑名单明确禁止触碰；`--checkup` 与交互菜单会提示你改用
-> 微信「设置 → 存储空间」清理。同样受保护的还有 `D:\WeixinShuju\xwechat_files` 等。
+**v0.9.0 起吸收 BleachBit + Dism++ 的清理能力**：浏览器站点数据（DOM/本地存储、会话、
+登录密码、表单历史、站点偏好、同步数据）、浏览器数据库压缩（SQLite `VACUUM`，不删数据）、
+以及 Dism++「空间回收」的 Windows 事件日志 / 崩溃内存转储 / .NET 原生映像缓存等。
 
 ---
 
 ## ✨ 功能特性
 
-- 🗂 **分类清理**：系统临时文件、GPU 着色器缓存、浏览器/网页缓存、微信运行缓存、
-  游戏平台缓存、开发工具缓存、下载旧文件、回收站，以及**管理员深度清理**
-  （Windows 更新缓存 / Prefetch / 事件日志 / 崩溃转储）
-- 🔍 **先预览后确认**：扫描 → 展示体积与文件列表（按体积从大到小）→ 人工确认 → 执行
-- 🚦 **风险分级**：🟢/🟡/🔴 彩色徽标；高风险分类默认隐藏（`--risky` 或配置开启）
-- ♻️ **可回收**：优先删除到回收站（依赖 `send2trash`），未安装时降级为永久删除并提示
-- ↩️ **可撤销**：`--undo-last` 把最近一次「进回收站」的清理从回收站恢复回来
-- 📋 **审计与历史**：每次清理记录 `history.json` + `audit.log`，`--history` 可查
-- 🛡 **智能安全**：受保护路径黑名单 + 白名单清空例外、删除前**二次防御**、
-  清空时逐项跳过受保护子项、跳过符号链接与 junction、逐项捕获权限错误；
-  **进回收站失败时默认保留原文件**，绝不静默转永久删除
-- 👑 **管理员感知**：需管理员的分类未提权时自动跳过并提示；`--admin` 一键 UAC 提权
-- 🔒 **安全擦除**：`--shred` 永久删除前随机覆写文件内容（降低恢复概率）
-- 🩺 **一键体检**：`--checkup` 只读汇总管理员状态、磁盘可用、回收站、可清理分类
-- 📦 **配置导入导出**：`--export-config` / `--import-config`
-- 🎨 **友好界面**：Windows 控制台 ANSI 彩色输出（自动降级）、中文对齐、
-  磁盘可用空间与回收站占用展示
-- 🧭 **本机适配**：启动时只读探测这台机器（浏览器/GPU/微信布局/Steam/pnpm store/
-  开发工具），`--checkup` 有「运行环境适配」小节，交互菜单顶部有「本机适配」行；
-  未安装软件的缓存分类会明确显示为空，避免"为啥这项是 0"的疑惑
-- 🎛 **交互式菜单**：默认运行即进入菜单，可循环多轮选择清理；**汇总表即菜单**
-  （只给有内容的分类编号）、支持区间选择（`1,3-5`）、`r` 连回收站一起清、
-  `d` 详情 / `t` 树形 / `s` 排序 / `x` 切换高风险显示 / `q` 退出
-- ♻️ **回收站一键处理**：菜单直接选 `r`（或 `--clean recycle_bin`）清空回收站
-- ⚙️ **可配置**：`config.json` 可保存回收站偏好、失败回退策略、额外保护路径、
-  自定义规则、只扫描指定分类、预览行数、是否显示高风险、是否记录历史等
+- 🗂 **分类清理**：23 个清理分类、203 条内置规则（含 `--deep` 深度规则 30 条），覆盖系统临时
+  文件、GPU 着色器缓存、浏览器/网页缓存、微信 4.x 运行缓存、游戏平台缓存、开发工具缓存、
+  下载旧文件、回收站，以及**管理员深度清理**（Windows 更新缓存 / Prefetch / 事件日志 /
+  崩溃转储 / .NET 原生映像等）。
+- 🔍 **先预览后确认**：扫描 → 展示体积与文件列表（按体积从大到小）→ 人工确认 → 执行。
+- 🚦 **风险分级**：🟢 安全 / 🟡 一般 / 🔴 高风险彩色徽标；高风险分类默认隐藏（`--risky`
+  或配置 `show_risky` 开启），`--all` 也不会选中它们。
+- ♻️ **可回收**：优先删除到回收站（依赖 `send2trash`），未安装时降级为永久删除并提示。
+- ↩️ **可撤销**：`--undo-last` 把最近一次「进回收站」的清理从回收站恢复回来。
+- 📋 **审计与历史**：每次清理记录 `history.json` + `audit.log`，`--history` 可查。
+- 🛡 **智能安全**：受保护路径黑名单 + 白名单清空例外、删除前**二次防御**、清空时逐项跳过
+  受保护子项、跳过符号链接与 junction、逐项捕获权限错误；**进回收站失败时默认保留原文件**，
+  绝不静默转永久删除。
+- 🧩 **数据库压缩（v0.9.0）**：`compact_db` 目标类型用 SQLite `VACUUM` 对浏览器
+  `History` / `Web Data` / `Login Data` / `Cookies` / `places.sqlite` 等库重写以释放碎片，
+  **不删除任何数据**，浏览器下次运行自动重建；库被占用/只读时安全跳过。
+- 🧭 **本机适配**：启动时只读探测这台机器（浏览器 / GPU / 微信布局 / Steam / pnpm store /
+  开发工具），未安装软件的缓存分类自动显示为空。
+- 🎛 **交互式菜单**：汇总表即菜单（只给有内容的分类编号）、支持区间选择（`1,3-5`）、
+  `r` 连回收站一起清、`d` 详情 / `t` 树形 / `s` 排序 / `x` 切换高风险显示 / `q` 退出。
+- ⚙️ **可配置**：`config.json` 可保存回收站偏好、失败回退策略、额外保护路径、自定义规则、
+  只扫描指定分类、预览行数、是否显示高风险、是否记录历史等。
+
+---
+
+## 🗂 内置清理分类（23 个）
+
+| 分类 key | 名称 | 风险 | 清理内容 |
+| --- | --- | --- | --- |
+| `system_temp` | 系统临时文件 | 🟢 | 用户/系统 Temp、缩略图/图标缓存、WebCache、错误报告、最近文档/跳转列表、崩溃转储 |
+| `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA/AMD DXCache+GLCache、DirectX D3DSCache、NV_Cache（可安全重建） |
+| `web_cache` | 浏览器/网页缓存 | 🟢 | Edge/Chrome/Firefox/Brave/Vivaldi/Opera 缓存与 GPU 缓存、Steam htmlcache、INetCache |
+| `wechat_cache` | 微信运行缓存 | 🟢 | 微信 4.x：`%APPDATA%\Tencent\xwechat\net`/`net_1` 网络缓存（聊天数据目录绝对不动） |
+| `office_caches` | 办公软件缓存 | 🟢 | Office 文档同步缓存（OneDrive/SharePoint）、WPS 缓存 |
+| `media_caches` | 多媒体设计软件缓存 | 🟢 | Adobe Premiere Pro / After Effects 媒体缓存 |
+| `comm_caches` | 通信工具缓存 | 🟢 | Zoom、Discord、Telegram 缓存 |
+| `game_caches` | 游戏平台缓存 | 🟡 | 完美世界更新包、Steam appcache/logs/着色器缓存、Epic/Battle.net/GOG/Riot |
+| `game_runtime_cache` | 游戏运行时缓存 | 🟡 | 无畏契约、三角洲行动、Unreal Engine、CS:GO 缓存/日志 |
+| `dev_caches` | 开发工具缓存 | 🟡 | pnpm/pip/npm/uv/yarn/Go/cargo/NuGet/Gradle/WinGet 缓存、`__pycache__`、Electron/Docker/VSCode/JetBrains/VS |
+| `downloads` | 下载/旧文件 | 🔴 | Downloads 中的大文件/久未使用文件/安装包（默认隐藏） |
+| `recycle_bin` | 回收站 | 🟡 | 清空回收站（单独确认，用 `r` 或 `--clean recycle_bin`） |
+| `system_admin` | 系统深度清理 | 🟡 | Windows 更新缓存、Prefetch、系统 Temp、chkdsk 残留(found.*)、更新日志(KB*.log)、备份(*.bak)、事件日志、崩溃转储、.NET 原生映像缓存（需管理员） |
+| `windows_old` | 旧版 Windows 残留 | 🔴 | `C:\Windows.old`（默认隐藏，需管理员，不可恢复） |
+| `dev_purge` | 项目构建产物 | 🔴 | 散落 node_modules / dist / build / target / .next 等（默认隐藏） |
+| `browser_privacy` | 浏览器隐私数据 | 🔴 | Edge/Chrome/Firefox 的 Cookie 与浏览历史（默认隐藏，会退出登录） |
+| `browser_data` | 浏览器站点数据 | 🔴 | DOM/本地存储、会话、表单历史、登录密码、站点偏好/权限、同步数据（默认隐藏，会退出登录） |
+| `database_compact` | 浏览器数据库压缩 | 🟢 | 对浏览器 SQLite 库执行 `VACUUM` 释放碎片（**不删数据**，安全） |
+| `hidden_installer_backups` | 隐蔽的安装包/升级残留 | 🟡 | `$Windows.~BT`/`~WS`、MSI Package Cache、WinSxS 临时目录（需管理员） |
+| `recycle_and_diagnostics` | 回收站与诊断日志(ETL) | 🟡 | `$Recycle.Bin`、ETL 诊断日志、WinSAT（需管理员） |
+| `cloud_app_hidden` | 云盘与商店应用缓存 | 🟢 | OneDrive 缓存、Windows Store 应用临时文件 |
+| `java_rdp_legacy` | Java/远程桌面/字体缓存 | 🟢 | Java 部署缓存、远程桌面位图缓存、系统字体缓存 |
+| `crash_telemetry` | 崩溃上报与遥测数据 | 🟢 | WER 错误报告归档/队列、遥测存储 |
+| `extreme_stealth` | 变态级隐蔽缓存(系统账户) | 🟡 | SYSTEM 账户缓存、CBS 历史日志、大体积事件日志、Steam/EpiC 下载残留、音视频客户端缓存（需管理员） |
+
+> 🟢 安全（随便清）· 🟡 一般（清理后按需重建）· 🔴 高风险（默认隐藏，需 `--risky`）。
+> 各分类默认启用合理的体积/时间阈值与黑名单，避免误删正在使用的文件。
+
+> ⚠️ **非文件 / 系统级项**（BleachBit / Dism++ 中属于注册表或系统工具范畴的清理，如
+> MUICache、快速运行/最近查询/Shellbags 历史、系统还原点、被取代的 WinSxS 组件、释放磁盘
+> 空闲区域、剪贴板等）本工具**不删除、不伪造路径**，已在 `pc_cleaner/rules.json` 顶部的
+> `manual_notes` 中说明，建议用系统自带工具或注册表处理。
 
 ---
 
 ## 🔒 安全模型（重要）
 
-本工具遵循「先预览、后删除、可恢复、有保护」的原则：
-
 1. **不未经确认就删除**：所有删除都需要人工确认（`--yes` 除外，谨慎使用）。
-2. **进入回收站优先**：默认尝试删除到回收站，可随时还原；进回收站失败时
-   **默认保留原文件**（可配置 `recycle_error_fallback` 打开回退永久删除）。
-3. **风险分级**：高风险分类（下载文件、构建产物、隐私数据、Windows.old）
+2. **进入回收站优先**：默认尝试删除到回收站，可随时还原；进回收站失败时**默认保留原文件**
+   （可配置 `recycle_error_fallback` 打开回退永久删除）。
+3. **风险分级**：高风险分类（下载文件、构建产物、浏览器隐私/站点数据、Windows.old）
    **默认隐藏**，`--all` 不会选中它们；`--clean` 显式指定时给出警告。
-4. **黑名单保护**：内置绝不触碰 `C:\Windows\System32`、`C:\Windows\WinSxS`、
-   `$RECYCLE.BIN`、`System Volume Information`、**微信聊天数据**
-   （`WeixinShuju` / `xwechat_files`）等，并支持自定义。
+4. **黑名单保护**：绝不触碰 `C:\Windows\System32`、`WinSxS`、`$Recycle.Bin`、
+   `System Volume Information`、**微信聊天数据**（`WeixinShuju`/`xwechat_files`）、
+   `.git`/`.venv` 等，并支持自定义。匹配采用**组件级全等**：相对模式（如 `windows\system32`、
+   `weixinshuju`）命中任意一级路径即受保护，不会像子串那样误伤 `windows.old`。
 5. **白名单清空例外**：`%WINDIR%\SoftwareDistribution\Download`、`%WINDIR%\Prefetch`、
    `%WINDIR%\Temp` 等位于受保护前缀之下的**明确可重建缓存**，仅允许「清空内容」，
-   删除目录本身仍被拒绝；白名单按 `%WINDIR%` 动态解析，**与系统盘符解耦**
-   （系统盘不是 `C:` 也能正确保护）。
-6. **删除前二次防御**：engine 层再次检查每个目标——磁盘根路径与受保护路径
-   一律拒绝，即使扫描器漏判也删不掉。
+   删除目录本身仍被拒绝；白名单按 `%WINDIR%` 动态解析，与系统盘符解耦。
+6. **删除前二次防御**：engine 层再次检查每个目标——磁盘根路径、系统关键文件
+   （`pagefile.sys` 等）与受保护路径一律拒绝，即使扫描器漏判也删不掉。
 7. **跳过危险结构**：不删除未知/系统目录，不跟随符号链接与 junction。
 8. **逐项容错**：单个文件被占用/无权限时跳过并继续，不中断整个任务。
 9. **审计留痕**：每次清理写入 `history.json`（结构化）与 `audit.log`（人类可读）。
 
-> ⚠️ 清理工具天然有风险。请务必先看**预览清单**，不确定的分组不要勾选。
+> 📌 微信聊天数据在**数据目录**（如 `D:\WeixinShuju`），本工具只清理
+> `%APPDATA%\Tencent\xwechat` 下的**网络运行缓存**，**绝不**触碰聊天记录；若数据目录很大，
+> 请用微信「设置 → 存储空间」的官方清理。
 >
-> 📌 **关于微信**：本机是**微信 4.x**（Weixin）。本工具只清理
-> `%APPDATA%\Tencent\xwechat` 下的**网络运行缓存**（`net` / `net_1`），
-> **不会**删除你的聊天记录、图片、视频或文件（聊天数据在数据目录如
-> `D:\WeixinShuju`，黑名单明确禁止触碰）。若数据目录占用很大，请用
-> 微信「设置 → 存储空间」的官方清理功能处理。
+> 📌 `browser_privacy` / `browser_data` 会删除 Cookie、浏览历史、登录密码与站点数据，
+> 导致**退出登录**并重置站点设置，属于高风险分类，默认隐藏，请谨慎开启；清理前先退出浏览器。
 >
-> 📌 **关于浏览器隐私数据**：`browser_privacy` 分类会删除 Cookie 与浏览历史，
-> 导致**退出登录**，属于高风险分类，默认隐藏，请谨慎开启。
->
-> 📌 **关于 `--undo-last`（回收站恢复）**：恢复依赖解析回收站 `$I` 元数据文件
-> （Windows 内部格式，Win10/11 实测一致），对损坏/截断/无权限的条目会安全跳过；
-> 若文件已被手动清空回收站或原位置已有同名文件，也无法恢复。
->
-> 📌 **交互菜单热重载**：菜单每轮循环会重新读取 `rules.json` 与 `config.json`，
-> 编辑后**无需重启程序**，下一次扫描即生效。
-
----
-
-## 🖥 运行环境（本机实测 · 适配依据）
-
-- **OS**：Windows IoT Enterprise LTSC，内核 10.0.26100（24H2，管理员账户；
-  注册表 ProductName 显示 "Windows 10 IoT Enterprise LTSC 2024"）
-- **CPU / 内存**：AMD Ryzen 5 5600（6 核 12 线程）/ 16 GB
-- **GPU**：NVIDIA GeForce RTX 3060（对应 `gpu_caches` 分类命中 DXCache/GLCache/D3DSCache）
-- **磁盘**：C 盘 150 GB（系统，可用 ≈124 GB）、D 盘 326.6 GB（可用 ≈155 GB）
-- **浏览器**：仅 **Microsoft Edge**（Chrome/Firefox/Brave/Vivaldi/Opera 均未安装，
-  相关规则保留给其它机器，本机自动为空）
-- **微信**：**4.x**（Weixin 4.1.12，装在 `D:\Weixin`；数据目录 `D:\WeixinShuju` ≈13.7GB，
-  由微信自身管理，本工具不碰）
-- **游戏**：Steam 装在 `D:\Program Files (x86)\Steam`
-- **开发工具**：Node/npm/pnpm（store 在 **`D:\.pnpm-store`**）、Python pip、Java、.NET、
-  Git；未装 Go/cargo/uv 等（对应缓存为空）
-- **Python**：3.12.3（建议 3.10+）
-
-> 以上均为**只读探测**结果（见 `pc_cleaner/env.py`），换一台电脑运行时工具会自动
-> 探测新机器并只显示实际存在的内容。
-> Windows 之外平台可运行，但分类路径以 Windows 为目标；
-> 需管理员的分类与回收站恢复仅 Windows 有效。
+> 📌 `database_compact` 只执行 SQLite `VACUUM`，**不删除数据**，安全；若浏览器正在运行导致
+> 数据库被占用，程序会安全跳过该库。
 
 ---
 
@@ -221,8 +116,7 @@ v0.3 升级（借鉴 GitHub 开源清理工具）：
 要求：Python 3.10+（推荐 3.12）。
 
 > ⚠️ `python -m pc_cleaner` 必须在**项目根目录**（含 `pc_cleaner/` 包、`pyproject.toml`
-> 的那一层）运行，不要进入 `pc_cleaner/` 子目录。Windows 用户可直接双击
-> `pc_cleaner.bat`（已自动切到根目录），或先 `pip install -e .` 后再从任意目录运行。
+> 的那一层）运行，不要进入 `pc_cleaner/` 子目录。Windows 用户可直接双击 `pc_cleaner.bat`。
 
 ```bash
 # 克隆后进入**项目根目录**
@@ -231,27 +125,20 @@ python -m pc_cleaner                  # 进入交互式清理菜单
 python -m pc_cleaner --checkup        # 一键体检（管理员状态/磁盘/回收站/可清理量）
 ```
 
-**便携运行不写系统盘**：设置环境变量 `PC_CLEANER_HOME` 把配置/历史/审计日志
-重定向到其它目录（例如工作区），全程不在 C 盘留任何文件：
+**便携运行不写系统盘**：设置 `PC_CLEANER_HOME` 把配置/历史/审计日志重定向到其它目录：
 
 ```powershell
 $env:PC_CLEANER_HOME = "D:\your\workspace\.pc_cleaner_runtime"
 python -m pc_cleaner --checkup
 ```
 
-**Windows 双击运行**：双击项目根目录下的 `pc_cleaner.bat`（加 `--no-pause` 可
-让窗口结束时自动关闭）。
+**Windows 双击运行**：双击 `pc_cleaner.bat`（加 `--no-pause` 可让窗口结束时自动关闭）。
 
-或安装为命令行工具：
+或安装为命令行工具（推荐装 `send2trash`，让删除进回收站）：
 
 ```bash
 pip install -e .                      # 基础版（标准库）
 pip install -e ".[recycle]"           # 推荐：支持删除到回收站
-```
-
-推荐先安装 `send2trash`（让删除进回收站）：
-
-```bash
 pip install send2trash
 ```
 
@@ -260,114 +147,86 @@ pip install send2trash
 ## 🖥 命令行用法
 
 ```
-python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 排序方式]
+python -m pc_cleaner [--list|-l] [--detail|-d] [--tree] [--sort 方式]
                      [--max-depth 深度] [--deep|-D] [--export-scan PATH] [--no-progress]
-                     [--clean 分类名] [--all] [--exclude 分类名]
-                     [--dry-run] [--recycle|--permanent] [--recycle-fallback]
+                     [--clean 分类名] [--all] [--exclude 分类名] [--dry-run]
+                     [--recycle|--permanent] [--recycle-fallback] [--yes|-y] [--risky]
+                     [--shred] [--shred-passes N]
                      [--ext 扩展名] [--min-size-mb MB] [--older-than-days 天数]
-                     [--json] [--yes|-y] [--risky] [--shred] [--shred-passes N]
-                     [--checkup] [--history] [--undo-last] [--admin]
+                     [--json] [--checkup] [--history] [--undo-last] [--admin]
                      [--export-config PATH] [--import-config PATH] [--show-config]
+                     [--show-rules] [--validate-rules] [--version]
 ```
 
 | 参数 | 说明 |
 | --- | --- |
-| `--list` / `-l` | 仅扫描，列出各分类的占用与可清理体积、磁盘可用、回收站占用，不删除 |
+| `--list` / `-l` | 仅扫描，列出各分类占用、磁盘可用、回收站占用，不删除 |
 | `--detail` / `-d` | 详细展示每个分类下的所有目标目录/文件（不截断） |
 | `--tree` | 以树形视图展示扫描结果 |
-| `--sort 方式` | 排序方式：`size_desc`(默认) / `size_asc` / `name_asc` / `name_desc` / `count_desc` |
-| `--max-depth 深度` | find_dirs 遍历深度限制（默认 20） |
-| `--deep` / `-D` | 深度扫描：更大遍历深度（50）+ 启用 `deep_only` 高级清理规则 |
+| `--sort 方式` | `size_desc`(默认) / `size_asc` / `name_asc` / `name_desc` / `count_desc` |
+| `--max-depth 深度` | `find_dirs` 遍历深度限制（默认 20） |
+| `--deep` / `-D` | 深度扫描：更大遍历深度（50）+ 启用 `deep_only` 高级规则 |
 | `--export-scan PATH` | 将扫描结果导出为 JSON 文件 |
 | `--no-progress` | 不显示扫描进度条 |
-| `--clean 分类` | 直接清理指定分类（如 `web_cache,system_temp`，用逗号分隔多个） |
+| `--clean 分类` | 直接清理指定分类（如 `database_compact,system_temp`，逗号分隔） |
 | `--all` | 选中所有**非高风险**分类（含回收站）；高风险需另加 `--risky` |
 | `--exclude 分类` | 与 `--all`/`--clean` 联用：排除指定分类 |
-| `--dry-run` | 只预览，不真正删除（默认即预览确认） |
-| `--recycle` | 删除进回收站（若已安装 send2trash） |
-| `--permanent` | 永久删除（会先确认，默认需额外确认） |
+| `--dry-run` | 只预览，不真正删除 |
+| `--recycle` | 进回收站（需安装 send2trash） |
+| `--permanent` | 永久删除（会额外确认） |
+| `--recycle-fallback` | 进回收站失败时回退为永久删除（默认保留原文件并计入失败） |
+| `--yes` / `-y` | 跳过交互确认（谨慎使用） |
+| `--risky` | 显示/允许高风险分类 |
 | `--shred` | 永久删除前随机覆写文件内容（隐私增强） |
 | `--shred-passes N` | shred 覆写遍数（默认 1，上限 7，需配合 `--shred`） |
-| `--ext 扩展名` | 仅清理匹配扩展名的文件（如 `.log,.tmp,.bak`；目录目标不受影响） |
-| `--min-size-mb MB` | 全局最小体积过滤：只清理 >= 指定 MB 的目标 |
-| `--older-than-days 天数` | 全局最旧修改时间过滤：只清理 >= 指定天数的文件 |
-| `--recycle-fallback` | 进回收站失败时回退为永久删除（默认保留原文件并计入失败） |
-| `--risky` | 显示/允许高风险分类（下载旧文件、构建产物、浏览器隐私数据、Windows.old） |
-| `--checkup` | 一键体检：只读汇总管理员状态、磁盘可用、回收站、可清理分类（配合 `--deep` 深度体检） |
-| `--history` | 显示清理历史（时间/模式/释放空间/分类） |
+| `--ext 扩展名` | 仅清理匹配扩展名的文件（如 `.log,.tmp,.bak`） |
+| `--min-size-mb MB` | 全局最小体积过滤 |
+| `--older-than-days 天数` | 全局最旧修改时间过滤 |
+| `--json` | 以 JSON 输出；默认只扫描，删除需配合 `--yes` |
+| `--checkup` | 一键体检：管理员状态/磁盘/回收站/可清理量/运行环境适配 |
+| `--history` | 显示清理历史 |
 | `--undo-last` | 把最近一次「进回收站」的清理从回收站恢复回来 |
-| `--admin` | 以管理员身份重新启动（UAC 提权）后再执行 |
-| `--export-config PATH` | 把当前配置导出到 JSON 文件 |
-| `--import-config PATH` | 从 JSON 文件导入配置 |
-| `--json` | 以 JSON 输出结果；**默认只扫描**，真正删除需配合 `--yes`；`--yes` 与 `--dry-run` 同时使用时以 `--dry-run` 为准（不会删除），并返回 `action.would_delete` 目标预览 |
-| `--yes` / `-y` | 跳过交互确认（谨慎使用；删除方式仍由 `--recycle`/`--permanent`/配置决定） |
-| `--show-config` | 显示当前配置文件的路径与内容 |
-| `--show-rules` | 展示 `rules.json` 内置清理规则（配合 `--deep` 显示深度规则） |
+| `--admin` | 以管理员身份重新启动（UAC 提权） |
+| `--export-config` / `--import-config` | 配置导入/导出 |
+| `--show-config` | 显示当前配置 |
+| `--show-rules` | 展示 `rules.json` 内置规则（配合 `--deep` 显示深度规则） |
 | `--validate-rules` | 校验 `rules.json` 规则格式 |
 | `--version` | 显示版本 |
-
-> 管道输出（stdout 非终端）且命令为只读扫描时自动输出 JSON（借鉴 sifty），
-> 但**绝不**因管道自动执行删除。
 
 **示例：**
 
 ```bash
-# 查看能释放多少空间
-python -m pc_cleaner --list
-
-# 一键体检
-python -m pc_cleaner --checkup
-
-# 只清理 GPU 着色器缓存和微信运行缓存，进回收站
-python -m pc_cleaner --clean gpu_caches,wechat_cache --recycle
-
-# 全部清理（含管理员深度清理），但保留回收站和下载目录
+python -m pc_cleaner --list                                        # 查看能释放多少空间
+python -m pc_cleaner --checkup                                     # 一键体检
+python -m pc_cleaner --clean gpu_caches,wechat_cache --recycle     # 清理指定分类，进回收站
 python -m pc_cleaner --all --exclude downloads,recycle_bin --recycle
-
-# 高风险分类需显式开启
-python -m pc_cleaner --clean downloads --recycle --risky
-
-# 清理后查看历史，必要时从回收站恢复
-python -m pc_cleaner --history
-python -m pc_cleaner --undo-last
-
-# 以 JSON 输出扫描结果（自动化安全：不带 --yes 绝不删除）
-python -m pc_cleaner --list --json
-python -m pc_cleaner --json --clean system_temp --yes --recycle
-
-# 需要管理员权限的清理：未提权时自动跳过，或先 --admin 提权
-python -m pc_cleaner --clean system_admin --recycle --admin
-
-# 高级清理：深度扫描 + 只清 .log/.tmp 文件 + 多遍安全擦除
-python -m pc_cleaner --clean system_temp --deep --ext .log,.tmp --permanent --shred --shred-passes 3
-
-# 查看 / 校验内置规则（rules.json）
-python -m pc_cleaner --show-rules
-python -m pc_cleaner --show-rules --deep
-python -m pc_cleaner --validate-rules
+python -m pc_cleaner --clean database_compact                      # 只压缩浏览器数据库（不删数据）
+python -m pc_cleaner --clean downloads --recycle --risky           # 高风险分类需显式开启
+python -m pc_cleaner --history                                     # 查看历史
+python -m pc_cleaner --undo-last                                   # 从回收站恢复最近一次
+python -m pc_cleaner --clean system_admin --recycle --admin        # 管理员深度清理（UAC 提权）
+python -m pc_cleaner --validate-rules --show-rules                 # 校验/查看内置规则
 ```
 
 ---
 
-## 🗂 内置清理分类
+## 🖥 运行环境自动适配
 
-| 分类 key | 名称 | 风险 | 清理内容 |
-| --- | --- | --- | --- |
-| `system_temp` | 系统临时文件 | 🟢 | 用户/系统 Temp、缩略图/图标缓存、WebCache、错误报告、最近文档/跳转列表 |
-| `gpu_caches` | GPU 着色器缓存 | 🟢 | NVIDIA / AMD DXCache / GLCache + DirectX D3DSCache（可安全清理并重建） |
-| `web_cache` | 浏览器/网页缓存 | 🟢 | Edge/Chrome/Firefox/Brave/Vivaldi/Opera 缓存与 GPU 缓存、Steam htmlcache、INetCache |
-| `wechat_cache` | 微信运行缓存 | 🟢 | 微信 4.x：`%APPDATA%\Tencent\xwechat\net` / `net_1` 网络缓存（数据目录不动） |
-| `game_caches` | 游戏平台缓存 | 🟡 | 完美世界更新包、Steam appcache / logs |
-| `dev_caches` | 开发工具缓存 | 🟡 | pnpm/pip/npm/uv/yarn/Go/cargo/NuGet/Gradle 缓存、`__pycache__`、散落工具缓存 |
-| `downloads` | 下载/旧文件 | 🔴 | Downloads 中的大文件/久未使用文件/安装包（默认隐藏） |
-| `recycle_bin` | 回收站 | 🟡 | 清空回收站（单独确认） |
-| `system_admin` | 系统深度清理 | 🟡 | Windows 更新缓存、系统 Temp、chkdsk 残留(found.*)、更新日志(KB*.log)、备份残留(*.bak)、Prefetch、事件日志归档、系统崩溃转储（需管理员） |
-| `windows_old` | 旧版 Windows 残留 | 🔴 | `C:\Windows.old`（默认隐藏，需管理员，删除不可恢复） |
-| `dev_purge` | 项目构建产物 | 🔴 | 散落 node_modules / dist / build / target / .next 等（默认隐藏） |
-| `browser_privacy` | 浏览器隐私数据 | 🔴 | Cookie 与浏览历史（默认隐藏，会退出登录） |
+工具启动时用只读的 [`pc_cleaner/env.py`](pc_cleaner/env.py) **自动探测**这台机器实际安装了
+哪些东西（纯只读、零副作用、逐项容错）：
 
-> 🟢 安全（随便清）· 🟡 一般（清理后按需重建）· 🔴 高风险（默认隐藏，需 `--risky`）。
-> 各分类默认启用合理的体积/时间阈值与黑名单，避免误删正在使用的文件。
+- **浏览器**：Edge / Chrome / Firefox / Brave / Vivaldi / Opera（按用户数据目录判断）；
+- **GPU 厂商**：NVIDIA / AMD（按 `%LOCALAPPDATA%` 目录判断，对应着色器缓存可清）；
+- **微信布局**：4.x（Weixin，roaming `Tencent\xwechat`）还是 3.x，以及**微信数据目录**
+  （如 `D:\WeixinShuju` —— 只提示"请在微信内清理"，**绝不**触碰聊天数据）；
+- **Steam**：安装痕迹与已存在的 steamapps 库目录；
+- **pnpm store**：实际位置（含盘符根目录 `.pnpm-store`）；
+- **开发工具**：PATH 上可用的 node / npm / pip / go / java / dotnet / git 等。
+
+探测结果用于：交互菜单顶部「本机适配」一行，以及 `--checkup` 的「运行环境适配」小节。
+**换一台电脑运行时工具会自动重新探测**，未安装软件的缓存分类显示为空，避免"为啥这项是 0"
+的疑惑。Windows 之外平台可运行，但分类路径以 Windows 为目标；需管理员的分类与回收站恢复
+仅 Windows 有效。
 
 ---
 
@@ -386,14 +245,13 @@ python -m pc_cleaner --validate-rules
 | `preview_lines` | 每个分类预览最多展示的行数 | `12` |
 | `show_risky` | 交互菜单是否显示高风险分类 | `false` |
 | `enable_history` | 是否记录清理历史与审计日志 | `true` |
-| `scan_depth` | find_dirs 遍历深度限制 | `20` |
-| `default_detail` | 默认是否以详细模式显示扫描结果 | `false` |
-| `default_sort` | 默认排序方式（size_desc/size_asc/name_asc/count_desc） | `size_desc` |
-| `show_scan_progress` | 扫描时是否显示进度条 | `true` |
+| `scan_depth` | `find_dirs` 遍历深度限制 | `20` |
+| `default_detail` | 默认是否以详细模式显示 | `false` |
+| `default_sort` | 默认排序方式 | `size_desc` |
+| `show_scan_progress` | 扫描时是否显示进度 | `true` |
 | `compact_tree_view` | 是否默认使用树形视图 | `false` |
 
-首次运行后用 `--show-config` 查看，或手动编辑该文件；
-多台机器同步配置用 `--export-config` / `--import-config`。
+首次运行后 `--show-config` 查看；多台机器同步用 `--export-config` / `--import-config`。
 
 ---
 
@@ -411,16 +269,16 @@ pc-cleaner/
 │   ├── config.py        # 配置读写（支持 PC_CLEANER_HOME 重定向）
 │   ├── env.py           # 运行环境探测（只读：浏览器/GPU/微信/Steam/pnpm/开发工具）
 │   ├── console.py       # ANSI 颜色 / CJK 对齐 / UTF-8 输出（零依赖）
-│   ├── engine.py        # 删除引擎（回收站/永久、二次防御、shred、白名单例外、回收站恢复）
+│   ├── engine.py        # 删除引擎（回收站/永久、二次防御、shred、白名单例外、回收站恢复、数据库压缩）
 │   ├── history.py       # 清理历史 / 审计日志（--history / --undo-last）
-│   ├── models.py        # 数据结构
-│   ├── rules.py         # 分类规则加载/黑名单/白名单/风险分级（从 rules.json 读取）
-│   ├── rules.json       # 内置清理规则（单一数据源，含 deep_only 高级规则）
-│   └── scanner.py       # 安全扫描与体积计算（管理员感知、大小缓存）
-├── tests/               # 单元测试
+│   ├── models.py        # 数据结构（Target / CategoryResult、CleanMode、TargetAction 含 COMPACT）
+│   ├── rules.py         # 分类规则加载/黑名单/白名单/风险分级/规则校验
+│   ├── rules.json       # 内置清理规则（单一数据源，23 分类 / 203 目标，含 deep_only 与 manual_notes）
+│   └── scanner.py       # 安全扫描与体积计算（管理员感知、大小缓存、保护路径匹配）
+├── tests/               # 单元测试（75 个用例）
 ├── pyproject.toml
 ├── README.md
-├── pc_cleaner.bat	#一键启动
+├── pc_cleaner.bat       # 一键启动
 ├── CHANGELOG.md
 └── LICENSE
 ```
@@ -434,11 +292,14 @@ pip install -e ".[dev]"
 pytest
 ```
 
+当前测试套件：**75 passed**，覆盖核心扫描、保护路径匹配、shred、白名单清空例外、回收站
+`$I` 恢复、规则校验、以及 v0.9.0 的 `compact_db` 数据库压缩。
+
 ---
 
 ## 💖 支持作者
 
-如果这个工具帮你省下了时间或磁盘空间，欢迎扫码赞赏，支持持续开发维护：
+如果这个工具帮你在清理电脑垃圾时省下了时间或磁盘空间，欢迎扫码赞赏，支持持续开发维护：
 
 <p align="center">
   <img src="docs/donate.jpg" alt="赞赏码" width="220" />

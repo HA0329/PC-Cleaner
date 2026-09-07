@@ -1,7 +1,7 @@
 {
-  "version": "0.9.0",
-  "description": "PC Junk Cleaner 内置清理规则（基于本机实测 + BleachBit/Dism++ 吸收扩充）。v0.9.0 新增：BleachBit 浏览器站点数据（DOM/本地存储、会话、站点偏好、登录/表单数据、搜索引擎、同步数据）、浏览器数据库压缩（compact_db，VACUUM 释放碎片不删数据）、Dism++ 空间回收补充（Windows 事件日志、崩溃内存转储 MEMORY.DMP、.NET 原生映像缓存）。",
-  "note": "路径支持 Windows 环境变量（%TEMP% / %LOCALAPPDATA% / %APPDATA% / %WINDIR% / %USERPROFILE% / %SYSTEMDRIVE%）、~ 与 <CWD> 占位符；分隔符统一使用 /，运行时自动规范化。带 \"deep_only\": true 的规则只在 --deep 深度模式下启用；require_admin: true 表示需管理员权限。",
+  "version": "0.9.1",
+  "description": "PC Junk Cleaner 内置清理规则（基于本机实测 + BleachBit/Dism++ 吸收扩充）。v0.9.1 增强：所有规则改用标准环境变量/应用默认位置表达，跨机器、跨用户皆可用；补充微信 4.x 升级包与日志缓存、NVIDIA App/Overlay 界面缓存、WebView2 嵌入式浏览器缓存、本地游戏/直播伴侣缓存与 LocalLow GPU 缓存。v0.9.0 新增：BleachBit 浏览器站点数据（DOM/本地存储、会话、站点偏好、登录/表单数据、搜索引擎、同步数据）、浏览器数据库压缩（compact_db，VACUUM 释放碎片不删数据）、Dism++ 空间回收补充（Windows 事件日志、崩溃内存转储 MEMORY.DMP、.NET 原生映像缓存）。",
+  "note": "路径支持 Windows 环境变量（%TEMP% / %LOCALAPPDATA% / %APPDATA% / %WINDIR% / %USERPROFILE% / %SYSTEMDRIVE%）、~ 与 <CWD> 占位符；分隔符统一使用 /，运行时自动规范化。带 \"deep_only\": true 的规则只在 --deep 深度模式下启用；require_admin: true 表示需管理员权限。所有路径均以标准环境变量与软件默认位置表达，任何用户/任何电脑均可生效；本机特有的盘符路径（如 D:/Steam、D:/.pnpm-store）仅作为额外候选，目标盘符不存在时自动跳过，不影响其它机器。",
   "manual_notes": "以下为 BleachBit/Dism++ 中的项目，但属于【注册表 / 系统级工具】范畴，本工具不删除、不做伪造路径，仅在此说明（用系统自带工具或注册表处理）：1) MUICache——注册表 HKCU\\Software\\Microsoft\\Windows\\Shell\\MUICache（以及 HKCU\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache）；2) 快速运行/最近查询/Shellbags——注册表 RunMRU / TypedPaths / BagMRU；3) 剪贴板——系统剪贴板内容（非文件）；4) 释放磁盘空闲区域——需要覆盖写空白扇区（如 sdelete / cipher /w）；5) 系统还原点——卷影副本（vssadmin delete shadows）；6) 被取代的WinSxS组件——DISM /online /cleanup-image /startcomponentcleanup；7) 以前的Dism++组件——Dism++ 自身残留，通常随其卸载清理；8) 零售演示离线内容 / 损坏的Appx——需按版本判定，建议用 DISM 或系统清理。",
   "categories": [
     {
@@ -16,7 +16,8 @@
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/Microsoft/Windows/WebCache", "label": "网页窗口缓存" },
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/Microsoft/Windows/WER", "label": "Windows 错误报告" },
         { "type": "clear_dir", "path": "%APPDATA%/Microsoft/Windows/Recent", "label": "最近文档/跳转列表" },
-        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Microsoft/Windows/Caches", "label": "Windows 图标/字体缓存", "deep_only": true }
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Microsoft/Windows/Caches", "label": "Windows 图标/字体缓存", "deep_only": true },
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Microsoft/FontCache/4/CloudFonts", "label": "系统云端字体缓存", "deep_only": true }
       ]
     },
     {
@@ -29,7 +30,19 @@
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/AMD/DXCache", "label": "AMD DXCache" },
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/AMD/GLCache", "label": "AMD GLCache" },
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/D3DSCache", "label": "DirectX 着色器缓存(D3DSCache)" },
-        { "type": "clear_dir", "path": "%PROGRAMDATA%/NVIDIA Corporation/NV_Cache", "label": "NVIDIA NV_Cache 缓存" }
+        { "type": "clear_dir", "path": "%PROGRAMDATA%/NVIDIA Corporation/NV_Cache", "label": "NVIDIA NV_Cache 缓存" },
+        { "type": "clear_dir", "path": "%USERPROFILE%/AppData/LocalLow/NVIDIA/DXCache", "label": "NVIDIA DXCache(LocalLow)" }
+      ]
+    },
+    {
+      "key": "nvidia_app_cache",
+      "label": "NVIDIA 应用缓存",
+      "risk": "safe",
+      "note": "NVIDIA App（GeForce Experience 的替代品）与 NVIDIA Overlay 均基于 CEF（Chromium）界面，其 CefCache 与组件缓存可安全清理并自动重建，不影响驱动与游戏设置。",
+      "targets": [
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/NVIDIA Corporation/NVIDIA App/CefCache", "label": "NVIDIA App 界面缓存" },
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/NVIDIA Corporation/NVIDIA Overlay/CefCache", "label": "NVIDIA Overlay 界面缓存" },
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/NVIDIA Corporation/NVIDIA App/NvBackend/ApplicationOntology", "label": "NVIDIA 应用识别缓存", "deep_only": true }
       ]
     },
     {
@@ -71,10 +84,14 @@
       "key": "wechat_cache",
       "label": "微信运行缓存",
       "risk": "safe",
-      "note": "本机为微信 4.x（Weixin）：聊天记录等数据在数据目录（如 D:/WeixinShuju，含 xwechat_files），本工具绝不触碰；此处仅清理 %APPDATA%/Tencent/xwechat 下可重建的网络缓存。同时清理旧版 3.x 遗留的文件缓存（若存在）。请在微信「设置 → 存储空间」内清理聊天数据。",
+      "note": "本机为微信 4.x（Weixin）：聊天记录等数据在数据目录（如 D:/WeixinShuju，含 xwechat_files），本工具绝不触碰；此处仅清理 %APPDATA%/Tencent/xwechat 下的升级包、日志、崩溃报告与网络缓存（均为可重建）、旧版 3.x 遗留文件缓存（若存在）。请在微信退出后清理；聊天数据请用微信「设置 → 存储空间」清理。xwechat/xplugin 为插件模块，仅深度模式下可选清理（会自动重下）。",
       "targets": [
+        { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/update", "label": "微信 4.x 升级包缓存（update）" },
+        { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/log", "label": "微信 4.x 运行日志" },
+        { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/crashinfo", "label": "微信 4.x 崩溃报告" },
         { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/net", "label": "微信 4.x 网络缓存" },
         { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/net_1", "label": "微信 4.x 网络缓存(2)" },
+        { "type": "clear_dir", "path": "%APPDATA%/Tencent/xwechat/xplugin/plugins", "label": "微信 4.x 插件模块（重下）", "deep_only": true },
         { "type": "glob_dirs", "base": "%USERPROFILE%/Documents/WeChat Files", "pattern": "*/Cache", "action": "clear", "label": "微信 3.x 旧版文件缓存（若存在）", "deep_only": true }
       ]
     },
@@ -85,6 +102,7 @@
       "note": "Microsoft Office 和 WPS 的本地同步缓存、临时文件，删除后软件会自动重建，不影响文档内容。",
       "targets": [
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/Microsoft/Office/16.0/OfficeFileCache", "label": "Office 文档同步缓存（OneDrive/SharePoint）", "deep_only": true },
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Microsoft/Office/16.0/SmartLookupCache", "label": "Office 智能查找缓存", "deep_only": true },
         { "type": "clear_dir", "path": "%APPDATA%/Kingsoft/wps/cache", "label": "WPS 缓存", "deep_only": true }
       ]
     },
@@ -138,6 +156,19 @@
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/UnrealEngine/Common/Cache", "label": "Unreal Engine 缓存" },
         { "type": "clear_dir", "path": "%LOCALAPPDATA%/Counter-Strike Global Offensive", "label": "CS:GO 缓存（可能含配置，请确认）" },
         { "type": "glob_dirs", "base": "%LOCALAPPDATA%", "pattern": "*/Saved/Cache", "action": "clear", "label": "常见游戏 Cache 目录", "deep_only": true }
+      ]
+    },
+    {
+      "key": "live_stream_cache",
+      "label": "直播伴侣/电竞平台缓存",
+      "risk": "moderate",
+      "note": "抖音直播伴侣（webcast_mate）与完美世界竞技平台（Wmpvp / perfectworldarena）的网页分区缓存与运行日志，均基于 Chromium，可安全重建。请在对应应用退出后清理。",
+      "targets": [
+        { "type": "clear_dir", "path": "%APPDATA%/perfectworldarena/Cache", "label": "完美世界竞技平台缓存" },
+        { "type": "clear_dir", "path": "%APPDATA%/Wmpvp/cache", "label": "Wmpvp 缓存" },
+        { "type": "clear_dir", "path": "%APPDATA%/Wmpvp/Log", "label": "Wmpvp 运行日志" },
+        { "type": "clear_dir", "path": "%APPDATA%/webcast_mate/Partitions", "label": "直播伴侣网页分区缓存" },
+        { "type": "clear_dir", "path": "%APPDATA%/webcast_mate/WBStore", "label": "直播伴侣 WebStore 缓存" }
       ]
     },
     {
@@ -275,7 +306,7 @@
       "key": "database_compact",
       "label": "浏览器数据库压缩",
       "risk": "safe",
-      "note": "BleachBit「整理优化数据库」：对浏览器的 History / Web Data / Login Data / Cookies / places.sqlite 等 SQLite 数据库执行 VACUUM 重写以释放碎片。**不删除数据**，仅去掉空闲页，浏览器下次运行自动重建；数据库被占用/只读时安全跳过。",
+      "note": "BleachBit「整理优化数据库」：对浏览器的 History / Web Data / Login Data / Cookies / places.sqlite 等 SQLite 数据库执行 VACUUM 重写以释放碎片。**它不删除数据**，仅去掉空闲页，浏览器下次运行自动重建；所以它与「清除浏览记录/密码」是两回事，属于安全分类。⚠ **请先完全退出对应浏览器（含系统托盘/后台进程）**，否则 SQLite 文件被浏览器进程占用、独占锁定，会报「unable to open database file」而失败——这不是错误，文件被占用时工具会安全跳过；对「删掉历史/密码/退出登录」的需求请改用高风险分类「浏览器隐私数据/站点数据」。",
       "targets": [
         { "type": "compact_db", "base": "%LOCALAPPDATA%/Microsoft/Edge/User Data", "pattern": "*/History", "label": "Edge 历史库压缩" },
         { "type": "compact_db", "base": "%LOCALAPPDATA%/Microsoft/Edge/User Data", "pattern": "*/Web Data", "label": "Edge 表单库压缩" },
@@ -289,6 +320,22 @@
         { "type": "compact_db", "base": "%LOCALAPPDATA%/Google/Chrome/User Data", "pattern": "*/Network/Cookies", "label": "Chrome Cookie 库压缩(新版)" },
         { "type": "compact_db", "base": "%APPDATA%/Mozilla/Firefox/Profiles", "pattern": "*/places.sqlite", "label": "Firefox 历史库压缩" },
         { "type": "compact_db", "base": "%APPDATA%/Mozilla/Firefox/Profiles", "pattern": "*/formhistory.sqlite", "label": "Firefox 表单库压缩" }
+      ]
+    },
+    {
+      "key": "webview2_caches",
+      "label": "WebView2 嵌入式浏览器缓存",
+      "risk": "moderate",
+      "note": "Windows Store/UWP 应用、系统组件（如 Windows 应用、Office、照片等）内嵌的 WebView2 会把网页/GPU/着色器缓存与组件包写入各自安装目录。删除后自动重建；不含 Cookie 与登录状态等站点数据。请关闭相关应用后清理。",
+      "targets": [
+        { "type": "glob_dirs", "base": "%LOCALAPPDATA%/Packages", "pattern": "*/LocalState/EBWebView/GrShaderCache", "action": "clear", "label": "WebView2 图形缓存" },
+        { "type": "glob_dirs", "base": "%LOCALAPPDATA%/Packages", "pattern": "*/LocalState/EBWebView/GPUPersistentCache", "action": "clear", "label": "WebView2 GPU 持久缓存" },
+        { "type": "glob_dirs", "base": "%LOCALAPPDATA%/Packages", "pattern": "*/LocalState/EBWebView/ShaderCache", "action": "clear", "label": "WebView2 着色器缓存" },
+        { "type": "glob_dirs", "base": "%LOCALAPPDATA%/Packages", "pattern": "*/LocalState/EBWebView/GraphiteDawnCache", "action": "clear", "label": "WebView2 Dawn 缓存" },
+        { "type": "glob_dirs", "base": "%LOCALAPPDATA%/Packages", "pattern": "*/LocalState/EBWebView/component_crx_cache", "action": "clear", "label": "WebView2 组件缓存" },
+        { "type": "glob_dirs", "base": "%LOCALAPPDATA%/Packages", "pattern": "*/LocalState/EBWebView/extensions_crx_cache", "action": "clear", "label": "WebView2 扩展缓存" },
+        { "type": "clear_dir", "path": "%LOCALAPPDATA%/Packages/Microsoft.WindowsStore_8wekyb3d8bbwe/LocalCache", "label": "Windows 商店缓存", "deep_only": true },
+        { "type": "glob_dirs", "base": "%LOCALAPPDATA%/Packages", "pattern": "*/LocalState/EBWebView/Crashpad", "action": "clear", "label": "WebView2 崩溃转储", "deep_only": true }
       ]
     },
     {

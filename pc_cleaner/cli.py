@@ -59,7 +59,7 @@ from .commands import (
     _cmd_validate_rules,
     _relaunch_as_admin,
 )
-from .config import load_config, save_config
+from .config import load_config, resolve_workers, save_config
 from .console import dim, red, yellow
 from .engine import CleanMode, delete_targets, empty_recycle_bin, recycle_available
 from .menu import (          # 从 menu 导入所有需要的交互函数，包括 _filters_from_args
@@ -76,7 +76,7 @@ from .menu import (          # 从 menu 导入所有需要的交互函数，包�
 from .models import CategoryResult, format_size
 from .rules import get_enabled_category_specs
 from .scanner import is_admin, print_detail_report, recycle_bin_size, scan_all
-from .ui import ScanProgressDisplay, _echo
+from .ui import ScanProgressDisplay, _echo, is_elevated
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +119,8 @@ def _build_parser() -> argparse.ArgumentParser:
                            help="将扫描结果导出为 JSON 文件")
     scan_group.add_argument("--no-progress", action="store_true",
                            help="不显示扫描进度")
+    scan_group.add_argument("--workers", type=int, default=None, metavar="N",
+                           help="并行扫描线程数（1=串行，0=按 CPU 自动，默认取配置 scan_workers）")
     scan_group.add_argument("--json", action="store_true",
                            help="以 JSON 格式输出扫描结果（非交互终端/管道下自动启用）")
 
@@ -126,7 +128,8 @@ def _build_parser() -> argparse.ArgumentParser:
     clean_group = p.add_argument_group("清理操作")
     clean_group.add_argument("--clean", metavar="KEY[,KEY...]",
                             help="直接清理指定分类（如 system_temp,web_cache；支持 recycle_bin）")
-    clean_group.add_argument("--all", action="store_true", help="选中所有分类（含回收站）")
+    clean_group.add_argument("--all", action="store_true",
+                            help="选中所有非高风险分类（默认不含回收站，见 all_includes_recycle_bin）")
     clean_group.add_argument("--exclude", metavar="KEY[,KEY...]",
                             help="与 --all/--clean 联用：排除指定分类")
     clean_group.add_argument("--dry-run", action="store_true", help="只预览，不真正删除")
@@ -236,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.deep and args.max_depth is None:
         scan_depth = max(scan_depth, 50)
 
+    # 并行扫描线程数（--workers 优先，其次配置 scan_workers）
+    workers = args.workers if args.workers is not None else resolve_workers(cfg)
+
     # 高级清理过滤参数（从 menu 导入的 _filters_from_args）
     ext_filter, min_size_bytes, older_than_secs, shred_passes = _filters_from_args(args)
 
@@ -245,6 +251,18 @@ def main(argv: list[str] | None = None) -> int:
     # 是否详细展示
     show_detail = args.detail or cfg.get("default_detail", False)
     show_tree = args.tree or cfg.get("compact_tree_view", False)
+
+    # 只导出扫描结果：先于「管道自动 JSON」处理，避免重定向时只输出 JSON 而没写文件
+    if args.export_scan:
+        progress = ScanProgressDisplay(enabled=show_progress)
+        results = scan_all(
+            specs,
+            scan_depth=scan_depth,
+            on_progress=progress if show_progress else None,
+            workers=workers,
+        )
+        progress.finish(results)
+        return _cmd_export_scan(results, args.export_scan)
 
     # 管道输出时自动切换 JSON
     if (
@@ -256,21 +274,23 @@ def main(argv: list[str] | None = None) -> int:
         args.json = True
 
     if args.json:
-        _json_stdout_mode(args, specs, cfg, mode, excluded, show_risky, scan_depth)
+        _json_stdout_mode(args, specs, cfg, mode, excluded, show_risky, scan_depth, workers)
         return 0
 
     if args.checkup:
-        return _cmd_checkup(specs, show_risky, scan_depth, show_progress, deep=args.deep)
+        return _cmd_checkup(
+            specs, show_risky, scan_depth, show_progress, deep=args.deep, workers=workers
+        )
 
     # 全量扫描
     progress = ScanProgressDisplay(enabled=show_progress and not show_detail and not show_tree)
-    all_results = scan_all(specs, scan_depth=scan_depth, on_progress=progress if show_progress else None)
+    all_results = scan_all(
+        specs,
+        scan_depth=scan_depth,
+        on_progress=progress if show_progress else None,
+        workers=workers,
+    )
     progress.finish(all_results)
-
-    # 导出扫描结果
-    if args.export_scan:
-        _cmd_export_scan(all_results, args.export_scan)
-        return 0
 
     # 展示用：默认隐藏高风险分类
     results = [r for r in all_results if show_risky or r.risk != "risky"]
@@ -300,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.clean and not args.all:
         return _interactive(
             results, specs, mode, args, cfg, show_risky,
-            sort_by, scan_depth, show_progress, deep=args.deep,
+            sort_by, scan_depth, show_progress, deep=args.deep, workers=workers,
         )
 
     # --- 选择分类 ---
@@ -309,7 +329,9 @@ def main(argv: list[str] | None = None) -> int:
     keys: list[str] = []
     if args.all:
         selected = [r for r in results if r.key.lower() not in excluded]
-        empty_bin = "recycle_bin" not in excluded
+        # 安全默认：--all 不再隐式清空回收站（清空不可恢复），
+        # 需显式 --clean recycle_bin 或配置 all_includes_recycle_bin=true
+        empty_bin = bool(cfg.get("all_includes_recycle_bin", False)) and "recycle_bin" not in excluded
     else:
         keys = _parse_keys(args.clean)
         risky_named = [k for k in keys if k != "recycle_bin"]
@@ -334,6 +356,9 @@ def main(argv: list[str] | None = None) -> int:
             _echo(red(f"无法识别的分类: {', '.join(missing)}"))
             _echo("可用分类: " + ", ".join(r.key for r in results))
             return 1
+        # 只选了 recycle_bin（或其它分类都被 --exclude 排除）时：
+        # 只要还有「清空回收站」这件事要做，就必须继续走清理流程，
+        # 不能因为 selected 为空就静默返回（旧版会直接 return 0，什么也没发生）。
         if not selected and not empty_bin and keys:
             _echo(yellow("所选分类均已被 --exclude 排除，未执行任何操作。"))
             return 0
@@ -411,6 +436,7 @@ def _json_stdout_mode(
     excluded: set[str],
     show_risky: bool = False,
     scan_depth: int = 20,
+    workers: int = 0,
 ) -> None:
     """--json 输出模式。
 
@@ -422,11 +448,12 @@ def _json_stdout_mode(
     - ``--clean/--all`` 未给 ``--yes``：返回 ``action.skipped=true`` 与
       ``action.would_delete_with_yes``（预览），**不删除**。
     """
-    results = scan_all(specs, scan_depth=scan_depth)
+    results = scan_all(specs, scan_depth=scan_depth, workers=workers)
     payload: dict[str, Any] = {
         "version": __version__,
         "recycle_available": recycle_available(),
         "admin": is_admin(),
+        "elevated": is_elevated(),
         "dry_run": args.dry_run,
         "categories": [
             {
@@ -451,7 +478,9 @@ def _json_stdout_mode(
     if args.clean or args.all:
         if args.all:
             keys = [r.key for r in results if show_risky or r.risk != "risky"]
-            keys.append("recycle_bin")
+            # 与交互模式保持一致：--all 默认不含回收站，避免自动化场景误清空
+            if cfg.get("all_includes_recycle_bin", False):
+                keys.append("recycle_bin")
         else:
             keys = _parse_keys(args.clean)
         keys = [k for k in keys if k not in excluded]
@@ -462,6 +491,7 @@ def _json_stdout_mode(
                 "selected": keys,
                 "target_count": len(_json_target_preview(results, keys, args)),
                 "would_delete": _json_target_preview(results, keys, args),
+                "would_empty_recycle_bin": "recycle_bin" in keys,
             }
         elif args.yes:
             keyset = {k.lower() for k in keys}
@@ -490,6 +520,7 @@ def _json_stdout_mode(
                 "mode": mode.value,
                 "deleted": res["deleted"],
                 "failed": res["failed"],
+                "skipped": res.get("skipped", 0),
                 "freed_bytes": res["freed"],
                 "selected": keys,
             }
@@ -503,6 +534,7 @@ def _json_stdout_mode(
                 "selected": keys,
                 "target_count": len(_json_target_preview(results, keys, args)),
                 "would_delete_with_yes": _json_target_preview(results, keys, args),
+                "would_empty_recycle_bin": "recycle_bin" in keys,
             }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 

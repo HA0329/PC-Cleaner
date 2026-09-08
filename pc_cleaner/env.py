@@ -182,12 +182,79 @@ def probe_wechat(measure_size: bool = False) -> dict[str, Any]:
     docs = _expand("%USERPROFILE%/Documents/WeChat Files")
     _add_candidate("WeChat Files(3.x)", docs, "WeChat Files")
 
+    # 可清理的微信运行缓存（4.x）：逐项列出实际存在的目录与体积，
+    # 让「微信运行缓存」分类为什么是 0 项 / 有多少可清一目了然。
+    cleanable: list[dict[str, Any]] = []
+    if roaming4:
+        candidates = [
+            ("插件模块(按需重下)", "%APPDATA%/Tencent/xwechat/xplugin/plugins"),
+            ("小程序容器缓存", "%APPDATA%/Tencent/xwechat/radium"),
+            ("网络缓存", "%APPDATA%/Tencent/xwechat/net"),
+            ("网络缓存(2)", "%APPDATA%/Tencent/xwechat/net_1"),
+            ("升级包缓存", "%APPDATA%/Tencent/xwechat/update"),
+            ("运行日志", "%APPDATA%/Tencent/xwechat/log"),
+            ("崩溃报告", "%APPDATA%/Tencent/xwechat/crashinfo"),
+        ]
+        for label, loc in candidates:
+            p = _expand(loc)
+            if not os.path.isdir(p):
+                continue
+            size = _dir_size_bytes(p) if measure_size else None
+            cleanable.append({"label": label, "path": p, "size_bytes": size})
+
     return {
         "layout": layout,
         "roaming4": roaming4,
         "roaming3": roaming3,
         "data_dirs": data_dirs,
+        "cleanable": cleanable,
     }
+
+
+def probe_component_stores(measure_size: bool = False) -> list[dict[str, Any]]:
+    """探测「不可用普通删除清理」的组件库/安装包缓存（只读，仅用于提示）。
+
+    - ``WinSxS``：组件库，只能用 ``DISM /Online /Cleanup-Image /StartComponentCleanup``；
+    - ``DriverStore``：驱动库，删除会破坏设备驱动；
+    - ``Windows\\Installer``：MSI 安装包缓存，删除会影响卸载/修复；
+    - ``System Volume Information``：系统还原点（卷影副本）。
+
+    本工具**绝不**删除这些内容（列入保护路径），这里只报告体积并给出官方清理命令。
+    """
+    items = [
+        {
+            "key": "winsxs",
+            "label": "WinSxS 组件库",
+            "path": _expand("%WINDIR%/WinSxS"),
+            "advice": "DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase（管理员）",
+        },
+        {
+            "key": "driverstore",
+            "label": "驱动库 DriverStore",
+            "path": _expand("%WINDIR%/System32/DriverStore/FileRepository"),
+            "advice": "请用 pnputil /enum-drivers 逐项评估，勿直接删除",
+        },
+        {
+            "key": "installer",
+            "label": "MSI 安装包缓存",
+            "path": _expand("%WINDIR%/Installer"),
+            "advice": "勿直接删除（影响软件卸载/修复），可用 PatchCleaner 等工具甄别孤立包",
+        },
+        {
+            "key": "vss",
+            "label": "系统还原点/卷影副本",
+            "path": _expand("%SYSTEMDRIVE%/System Volume Information"),
+            "advice": "vssadmin delete shadows /all（管理员，谨慎）",
+        },
+    ]
+    out: list[dict[str, Any]] = []
+    for item in items:
+        p = item["path"]
+        if not os.path.isdir(p):
+            continue
+        size = _dir_size_bytes(p) if measure_size else None
+        out.append({**item, "size_bytes": size})
+    return out
 
 
 def probe_steam() -> dict[str, Any]:
@@ -289,6 +356,7 @@ def probe_environment(measure_wechat_size: bool = False) -> dict[str, Any]:
         "steam": probe_steam(),
         "pnpm_stores": probe_pnpm_stores(),
         "dev_tools": probe_dev_tools(),
+        "component_stores": probe_component_stores(measure_size=measure_wechat_size),
     }
 
 
@@ -325,5 +393,32 @@ def wechat_data_summary(probe: dict[str, Any]) -> list[str]:
         lines.append(
             f"{d['label']}: {d['path']}（占用 {size_txt}，含聊天记录，"
             "请在微信「设置 → 存储空间」内清理）"
+        )
+    return lines
+
+
+def wechat_cleanable_summary(probe: dict[str, Any]) -> list[str]:
+    """返回微信**可清理运行缓存**的清单行（用于体检报告，与分类规则对齐）。"""
+    from .models import format_size
+
+    we = probe.get("wechat") or {}
+    lines: list[str] = []
+    for d in we.get("cleanable") or []:
+        size = d.get("size_bytes")
+        size_txt = format_size(size) if size is not None else "?"
+        lines.append(f"{d['label']}: {d['path']}（约 {size_txt}）")
+    return lines
+
+
+def component_store_summary(probe: dict[str, Any]) -> list[str]:
+    """返回「需系统工具清理」的组件库提示行（本工具不删除这些内容）。"""
+    from .models import format_size
+
+    lines: list[str] = []
+    for item in probe.get("component_stores") or []:
+        size = item.get("size_bytes")
+        size_txt = format_size(size) if size is not None else "?"
+        lines.append(
+            f"{item['label']}: {item['path']}（约 {size_txt}）→ {item['advice']}"
         )
     return lines

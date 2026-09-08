@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.9.2 (2026-09)
+
+> 主题：**针对本机实测加强清理能力 + 修复一批真实缺陷**。
+> 本机（Windows 10 IoT LTSC 2024 / Edge + NVIDIA + 微信 4.x + Steam + npm/pnpm 开发环境）
+> 可清理量从 **507 MB → 1.30 GB**，并修好了「扫描空间虚高、清理量不实、撤销无效」等硬伤。
+
+### 清理能力增强（本机实测校准）
+- **微信运行缓存大幅补强（本机 +675MB）**：新增 `xplugin/plugins` 插件模块
+  （实测 636MB，按需重下）与 `radium` 小程序容器缓存（`web` 39MB + deep 模式下的
+  `users/*/applet|xworker|udr`）；网络缓存改为 `net_*` 通配（覆盖 `net_1` 等实例）；
+  补 3.x 遗留 `WeChat/Logs`、`WeChat/Temp`。**聊天数据目录（WeixinShuju /
+  xwechat_files）依然绝不触碰**。
+- **新增 `system_logs` 分类（本机 +41MB）**：DISM / CBS / waasmedic / SIH / NetSetup
+  日志、`System32\LogFiles`（WMI、Scm 等）、`setupapi.*.log` / `setupact.log` /
+  `setuperr.log` 驱动安装日志、`WindowsUpdate.log` / `PFRO.log` / `DtcInstall.log`、
+  USOShared/USOPrivate 更新编排状态（本机 36MB）、传递优化 P2P 缓存与跟踪日志、
+  Panther 安装日志、`security\logs`、`debug`；deep 模式补 `SettingSync`、`SystemData`、
+  事件日志归档。
+- **开发缓存补强（本机 +450MB）**：npm `_npx`（实测 212MB）/ `_cacache` / `_logs`、
+  corepack 缓存、各盘根 `.pnpm-store` 通配、`~/.m2/repository`、VS Code 日志与缓存、
+  JetBrains 日志、VS 组件模型缓存。
+- **直播伴侣/电竞平台**：补 `perfectworldarena/Partitions`（本机 34.7MB）、
+  `webcast_mate` 组件缓存与日志。
+- **Steam 着色器缓存**加规则级 `max_depth: 3`：不再为了找 `shadercache`
+  遍历上百 GB 的 steamapps（本机单条规则 1.6s → 0.03s）。
+
+### 新增能力
+- **新 target 类型**：`empty_dirs`（空目录，支持 `min_age_days`）、
+  `zero_byte_files`（0 字节残留文件）。
+- **`ext` 扩展名过滤**：`glob_files` / `files_by_rule` / `zero_byte_files` 可写
+  `"ext": [".log", ".tmp"]`，比 `pattern` 更直观。
+- **`find_dirs` 规则级 `max_depth`**：单条规则即可限制下探层数。
+- **并行扫描**：`scan_all(workers=N)` + 配置 `scan_workers` / `--workers N`
+  （0=按 CPU 自动，1=串行）；结果顺序与规则顺序保持一致。
+- **`--checkup` 新增「组件库/系统级空间」小节**：报告 WinSxS（本机 7.51GB）、
+  DriverStore（3.34GB）、`Windows\Installer`（397MB）、卷影副本的体积与**官方清理
+  命令**（DISM / pnputil / vssadmin）——这些内容本工具不删除，只如实告知。
+- **`--checkup` 微信小节**新增「可清理运行缓存」清单（逐项路径 + 体积）。
+
+### 修复
+- **「可释放空间」虚高（重复计数）**：`npm-cache` 与 `npm-cache/_npx` 同时命中时，
+  子目录体积被算两次（本机 413MB 被重复计入）。现在父目录目标覆盖其子目录目标
+  （`_drop_subsumed`），分类内与跨分类都生效；COMPACT（数据库压缩）目标不参与覆盖。
+- **`--clean recycle_bin` 静默无操作**：旧版只选回收站时因 `selected` 为空直接
+  `return 0`，什么也没发生（菜单里的 `r` 是好的，命令行是坏的）。现在会正常预览
+  回收站体积并进入确认流程。
+- **`--undo-last` 永远匹配不上（恢复 0 项）**：`$I` 元数据解析从 offset 24 读路径，
+  对**目录**记录会把目录长度字段的低字节（`b'd\x00'`）当成路径首字符，导致原路径
+  比对失败。改为按真实布局从 offset 28 读取；`restore_paths` 同时支持
+  「父目录被整体回收」与「目录内容被逐条回收」两种情形，恢复后清理 `$I` 元数据。
+  实测：微信插件 15 个子项全部成功恢复。
+- **「释放约 X」不实**：CLEAR 目标此前把扫描时的估计值当作释放量（含被占用/受保护
+  文件），现在按删除前后体积差核算；`audit.log` 的 `freed` 不再恒为 0。
+- **部分失败被静默吞掉**：清空目录时子项被占用会返回 `skipped` 计数；一个都没删掉
+  时计为 `failed`，不再"假装成功"。实测：`waasmedic` / `USOShared\Logs` 被运行中的
+  系统服务占用，工具会如实报告「跳过」而不是虚报释放了 40MB。
+- **重解析点（符号链接 / junction）保护**：删除前拒绝链接自身与链接目标
+  （此前只跳过目录遍历），避免越界删除。
+- **`--all` 不再隐式清空回收站**：回收站不可恢复，改为需显式
+  `--clean recycle_bin`（或配置 `all_includes_recycle_bin=true`）；README/帮助同步更正。
+- **`--json` 补 `recycle_bin` 处理**：`--clean recycle_bin --yes` 现在会真正清空并
+  返回结果，`--dry-run` 返回 `would_empty_recycle_bin`。
+- **`--export-scan` 在管道/重定向下也能写文件**：此前会被「管道自动 JSON」提前拦截，
+  只输出 JSON、文件根本没生成；现在导出优先处理并打印结果摘要。
+- **版本号与文档一致**：`__init__.py` / `pyproject.toml` / `rules.json` 统一到 0.9.2；
+  README 的分类数（27）、规则数（283）、测试数同步更新。
+- **`CATEGORY_META` 补全**：13 个分类此前没有中文元信息（只有 rules.json 里有），
+  现在与规则文件一一对应。
+
+### 其它
+- `_dir_size` 对**受保护子树整棵剪枝**：体积统计更准（受保护内容本就不会被删），
+  同时避免统计注定要跳过的巨型目录。
+- `_dir_size` 递归写入每个子目录的 memo：父目录测一次后子目录规则直接命中缓存。
+- 空目录/0 字节目标不再占用预览行；`find_dirs` 命中的空目录不再产出 0 字节目标。
+- 新增 `tests/test_v092.py`（39 个用例，含交互菜单渲染回归测试），全套 **43 passed**。
+
 ## 0.9.0 (2026-09)
 
 ### 吸收 BleachBit + Dism++（借鉴两者能力）

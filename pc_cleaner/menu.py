@@ -37,7 +37,7 @@ from .history import append_session, make_session, record_deletion_audit
 from .models import CategoryResult, TargetKind, format_size
 from .rules import get_enabled_category_specs
 from .scanner import is_admin, recycle_bin_size, scan_all
-from .ui import ScanProgressDisplay, _echo, _risk_badge, prompt_yes_no
+from .ui import ScanProgressDisplay, _echo, _risk_badge, is_elevated, prompt_yes_no
 
 # 注意：不再从 .cli 导入任何内容，避免循环依赖
 
@@ -329,7 +329,7 @@ def _print_menu_footer(
     _echo("")
     _echo(dim("  操作: "))
     _echo(dim("    编号 如 1,3-5   选择分类（逗号/区间分隔，可多选）"))
-    _echo(dim("    all             全选 · r 回收站 · 0 清空选择"))
+    _echo(dim("    all / a         全选 · r 回收站 · 0 清空选择"))
     _echo(dim("    d <编号> 详情    t <编号> 树形 · s <排序> 切换 · x 高风险 · q 退出"))
     _echo("")
 
@@ -591,7 +591,14 @@ def _run_clean_flow(
             _preview_targets(fl, max_lines=max_lines, sort_by=sort_by)
 
     if empty_bin and not dry_run:
-        _echo(f"  【回收站】将清空回收站（{red('不可恢复')}）。")
+        bin_sz = recycle_bin_size() if sys.platform == "win32" else 0
+        if bin_sz > 0:
+            _echo(
+                f"  【回收站】将清空回收站（约 {yellow(format_size(bin_sz))}，"
+                f"{red('不可恢复')}）。"
+            )
+        else:
+            _echo(f"  【回收站】将清空回收站（{red('不可恢复')}）。")
 
     if shred and not dry_run and mode is CleanMode.PERMANENT:
         passes = max(1, min(int(shred_passes or 1), 7))
@@ -629,10 +636,10 @@ def _run_clean_flow(
     enable_history = bool(cfg.get("enable_history", True))
     audit_log = None
     if enable_history:
-        def audit_log(path, size, mode_name) -> None:
-            record_deletion_audit(path, size, mode_name)
+        def audit_log(path, size, mode_name, freed=0) -> None:
+            record_deletion_audit(path, size, mode_name, freed)
 
-    result: dict[str, Any] = {"deleted": 0, "failed": 0, "freed": 0, "empty_bin": empty_bin}
+    result: dict[str, Any] = {"deleted": 0, "failed": 0, "skipped": 0, "freed": 0, "empty_bin": empty_bin}
     if targets:
         res = delete_targets(
             targets,
@@ -645,11 +652,16 @@ def _run_clean_flow(
         )
         result["deleted"] += res["deleted"]
         result["failed"] += res["failed"]
+        result["skipped"] += res.get("skipped", 0)
         result["freed"] += res["freed"]
 
     if empty_bin:
+        before_bin = recycle_bin_size() if sys.platform == "win32" else 0
         bin_res = empty_recycle_bin()
         result["empty_bin_result"] = bin_res
+        after_bin = recycle_bin_size() if sys.platform == "win32" else 0
+        # 清空回收站释放的空间单独计入，让"释放约 X"更真实
+        result["freed"] += max(before_bin - after_bin, 0)
         _echo("回收站清空完成。")
 
     # 记录历史会话（--history / --undo-last 使用）
@@ -660,17 +672,28 @@ def _run_clean_flow(
             failed=result["failed"],
             freed=result["freed"],
             categories=[r.key for r in selected] + (["recycle_bin"] if empty_bin else []),
-            targets=[{"path": str(t.path), "size": t.size} for t in targets],
+            targets=[
+                {
+                    "path": str(t.path),
+                    "size": t.size,
+                    "action": t.action.value,
+                }
+                for t in targets
+            ],
             note="shred" if shred else "",
         )
         append_session(session)
 
     _echo("")
-    _echo(
+    summary = (
         f"完成：删除 {green(str(result['deleted']))} 项, "
         f"跳过/失败 {yellow(str(result['failed']))} 项, "
         f"释放约 {green(format_size(result['freed']))}。"
     )
+    if result.get("skipped"):
+        partial = result["skipped"]
+        summary += f" {dim(f'（另有 {partial} 个目录部分清理，剩余文件被占用）')}"
+    _echo(summary)
     _print_disk_free(selected)
     return result
 
@@ -689,11 +712,13 @@ def _interactive(
     scan_depth: int = 20,
     show_progress: bool = True,
     deep: bool = False,
+    workers: int = 0,
 ) -> int:
     """交互式菜单：选择 -> 预览 -> 确认 -> 清理，可循环继续。
 
     ``deep``：传入 ``--deep`` 标志，每轮循环重新加载 rules.json / 配置
     （热重载：编辑规则或配置后无需重启，下一轮扫描即生效）。
+    ``workers``：并行扫描线程数（>1 时多线程扫描，结果顺序不变）。
     """
     from .scanner import print_tree_report
 
@@ -704,7 +729,10 @@ def _interactive(
     else:
         _echo(yellow("  回收站支持: 否（将永久删除，请谨慎！建议 pip install send2trash）"))
     if is_admin():
-        _echo(green("  管理员权限: 是"))
+        admin_line = green("  管理员权限: 是")
+        if is_elevated():
+            admin_line += dim(" [UAC 提权]")
+        _echo(admin_line)
     else:
         _echo(yellow("  管理员权限: 否（系统深度清理分类将跳过，可用 --admin 提权）"))
 
@@ -803,7 +831,11 @@ def _interactive(
                 else:
                     _echo(dim("  已隐藏高风险分类。"))
                 progress = ScanProgressDisplay(enabled=show_progress)
-                fresh = scan_all(specs, scan_depth=scan_depth, on_progress=progress if show_progress else None)
+                fresh = scan_all(
+                    specs, scan_depth=scan_depth,
+                    on_progress=progress if show_progress else None,
+                    workers=workers,
+                )
                 progress.finish(fresh)
                 results = [r for r in fresh if show_risky or r.risk != "risky"]
                 continue
@@ -855,6 +887,10 @@ def _interactive(
         if not again:
             return 0
         progress = ScanProgressDisplay(enabled=show_progress)
-        fresh = scan_all(specs, scan_depth=scan_depth, on_progress=progress if show_progress else None)
+        fresh = scan_all(
+            specs, scan_depth=scan_depth,
+            on_progress=progress if show_progress else None,
+            workers=workers,
+        )
         progress.finish(fresh)
         results = [r for r in fresh if show_risky or r.risk != "risky"]

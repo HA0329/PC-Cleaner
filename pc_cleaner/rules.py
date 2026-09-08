@@ -95,6 +95,12 @@ DEFAULT_SKIP_DIRNAMES: set[str] = {
     ".vscode",
     "xwechat_files",    # 微信数据，遍历时跳过
     "weixinshuju",
+    "windows.old",      # 功能更新残留，体积巨大且需单独处理
+    "winsxs",           # 组件库，只允许系统工具（DISM）处理
+    "driverstore",      # 驱动库，删除会破坏设备驱动
+    "installer",        # MSI 安装包缓存，删除会影响卸载/修复
+    "$windows.~bt",
+    "$windows.~ws",
 }
 
 # ===========================================================================
@@ -177,6 +183,11 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
         "description": "NVIDIA / AMD / DirectX 着色器缓存，可安全清理并自动重建",
         "risk": "safe",
     },
+    "nvidia_app_cache": {
+        "label": "NVIDIA 应用缓存",
+        "description": "NVIDIA App / Overlay 的 CEF 界面缓存与组件缓存（可重建）",
+        "risk": "safe",
+    },
     "web_cache": {
         "label": "浏览器/网页缓存",
         "description": "Edge、Chrome、Firefox、Brave、Vivaldi、Opera、Steam 网页缓存、INetCache",
@@ -184,17 +195,42 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "wechat_cache": {
         "label": "微信运行缓存",
-        "description": "微信 4.x 网络缓存（数据目录中的聊天记录绝不触碰）",
+        "description": "微信 4.x 网络缓存/日志/升级包与插件模块（数据目录中的聊天记录绝不触碰）",
+        "risk": "safe",
+    },
+    "office_caches": {
+        "label": "办公软件缓存",
+        "description": "Office 文档同步缓存、智能查找缓存、WPS 缓存（可重建）",
+        "risk": "safe",
+    },
+    "media_caches": {
+        "label": "多媒体设计软件缓存",
+        "description": "Adobe Premiere Pro / After Effects 媒体缓存（可重建）",
+        "risk": "safe",
+    },
+    "comm_caches": {
+        "label": "通信工具缓存",
+        "description": "Zoom / Discord / Telegram 等通信应用临时缓存",
         "risk": "safe",
     },
     "game_caches": {
         "label": "游戏平台缓存",
-        "description": "完美世界竞技平台更新包缓存等",
+        "description": "Steam / Epic / Battle.net / GOG / Riot / 完美世界竞技平台缓存",
+        "risk": "moderate",
+    },
+    "game_runtime_cache": {
+        "label": "游戏运行时缓存",
+        "description": "无畏契约、三角洲行动、Unreal Engine、CS:GO 缓存与日志",
+        "risk": "moderate",
+    },
+    "live_stream_cache": {
+        "label": "直播伴侣/电竞平台缓存",
+        "description": "抖音直播伴侣、完美世界竞技平台网页分区缓存与运行日志",
         "risk": "moderate",
     },
     "dev_caches": {
         "label": "开发工具缓存",
-        "description": "pnpm/pip/npm/uv/yarn/Go/cargo/NuGet/Gradle 缓存与项目构建产物",
+        "description": "pnpm/npm/pip/uv/yarn/Go/cargo/NuGet/Gradle 缓存与散落工具缓存",
         "risk": "moderate",
     },
     "downloads": {
@@ -209,8 +245,13 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "system_admin": {
         "label": "系统深度清理(需管理员)",
-        "description": "Windows 更新缓存、系统 Temp、chkdsk 残留、更新日志、备份残留、预读取、事件日志归档、崩溃转储",
+        "description": "Windows 更新缓存、系统 Temp、chkdsk 残留、更新日志、预读取、事件日志、崩溃转储",
         "risk": "moderate",
+    },
+    "system_logs": {
+        "label": "系统日志与诊断残留",
+        "description": "DISM/CBS/waasmedic 日志、WMI 与安装日志、USB 安装日志、传递优化缓存、USOShared 更新状态",
+        "risk": "safe",
     },
     "windows_old": {
         "label": "旧版 Windows 残留",
@@ -229,13 +270,48 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "browser_data": {
         "label": "浏览器站点数据(高风险)",
-        "description": "DOM/本地存储、会话、站点偏好、登录/表单数据、搜索引擎与同步数据（会退出登录并重置站点设置，默认隐藏）",
+        "description": "DOM/本地存储、会话、站点偏好、登录/表单数据、搜索引擎与同步数据（会退出登录）",
         "risk": "risky",
     },
     "database_compact": {
         "label": "浏览器数据库压缩",
-        "description": "对浏览器的 History/Web Data/Login Data/Cookies/places.sqlite 等 SQLite 数据库执行 VACUUM 释放碎片（不删除数据，安全）",
+        "description": "对 History/Web Data/Login Data/Cookies/places.sqlite 执行 VACUUM 释放碎片（不删除数据）",
         "risk": "safe",
+    },
+    "webview2_caches": {
+        "label": "WebView2 嵌入式浏览器缓存",
+        "description": "UWP/系统应用内嵌 WebView2 的图形/着色器/组件缓存（可重建）",
+        "risk": "moderate",
+    },
+    "hidden_installer_backups": {
+        "label": "隐蔽的安装包/升级残留",
+        "description": "$Windows.~BT/~WS、MSI Package Cache、WinSxS 临时目录（需管理员）",
+        "risk": "moderate",
+    },
+    "recycle_and_diagnostics": {
+        "label": "回收站与诊断日志(ETL)",
+        "description": "各分区回收站、ETL 诊断跟踪日志、WinSAT 性能评估缓存",
+        "risk": "moderate",
+    },
+    "cloud_app_hidden": {
+        "label": "云盘与商店应用缓存",
+        "description": "OneDrive 缓存/授权缓存、Windows Store 应用临时文件",
+        "risk": "safe",
+    },
+    "java_rdp_legacy": {
+        "label": "Java/远程桌面/字体缓存",
+        "description": "Java 部署缓存、远程桌面位图缓存、系统字体缓存（可重建）",
+        "risk": "safe",
+    },
+    "crash_telemetry": {
+        "label": "崩溃上报与遥测数据",
+        "description": "WER 错误报告归档/队列、微软遥测服务存储",
+        "risk": "safe",
+    },
+    "extreme_stealth": {
+        "label": "变态级隐蔽缓存(系统账户)",
+        "description": "SYSTEM 账户缓存、CBS 历史日志、大体积事件日志、下载残留、音视频客户端缓存",
+        "risk": "moderate",
     },
 }
 
@@ -392,7 +468,9 @@ VALID_TARGET_TYPES: set[str] = {
     "glob_files",
     "files_by_rule",
     "find_dirs",
-    "compact_db",  # 对 SQLite 数据库执行 VACUUM 压缩（不删除，BleachBit「整理优化数据库」）
+    "compact_db",     # 对 SQLite 数据库执行 VACUUM 压缩（不删除，BleachBit「整理优化数据库」）
+    "empty_dirs",     # 删除 base 下的空目录（递归，可配置 min_age_days）
+    "zero_byte_files",  # 删除 base 下的 0 字节残留文件
 }
 # 合法的目录/文件动作
 VALID_ACTIONS: set[str] = {"clear", "delete"}
@@ -442,6 +520,20 @@ def validate_rules(specs: list[dict[str, Any]] | None = None) -> list[str]:
                 errors.append(f"{loc} 缺少 path")
             if ttype in ("glob_dirs", "glob_files", "files_by_rule") and not t.get("base"):
                 errors.append(f"{loc} 缺少 base")
+            if ttype in ("empty_dirs", "zero_byte_files"):
+                if not t.get("base"):
+                    errors.append(f"{loc} 缺少 base")
+                if ttype == "empty_dirs" and t.get("action") not in (None, "delete"):
+                    errors.append(
+                        f"{loc} empty_dirs 仅支持 action=delete（得到 {t.get('action')!r}）"
+                    )
+            if ttype == "files_by_rule" and not t.get("pattern"):
+                # files_by_rule 允许只按扩展名/阈值筛选，但至少要有一个筛选条件，
+                # 否则等价于「删除整个目录内容」，属于高危误用。
+                if not t.get("ext") and not t.get("min_size_mb") and not t.get("older_than_days"):
+                    errors.append(
+                        f"{loc} files_by_rule 需要 pattern 或 ext/min_size_mb/older_than_days 之一"
+                    )
             if ttype == "compact_db":
                 if not t.get("base"):
                     errors.append(f"{loc} 缺少 base")

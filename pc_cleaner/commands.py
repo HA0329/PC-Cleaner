@@ -29,7 +29,7 @@ from .history import load_history
 from .models import format_size
 from .rules import _builtin_specs, validate_rules
 from .scanner import _system_drives, is_admin, recycle_bin_size, scan_all
-from .ui import ScanProgressDisplay, _admin_tag, _echo, _risk_badge
+from .ui import ScanProgressDisplay, _admin_tag, _echo, _risk_badge, is_elevated
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +97,12 @@ def _cmd_print_env_adaptation() -> None:
 
     全部只读探测（见 :mod:`pc_cleaner.env`）；任何单项失败不影响其它输出。
     """
-    from .env import probe_environment, wechat_data_summary
+    from .env import (
+        component_store_summary,
+        probe_environment,
+        wechat_cleanable_summary,
+        wechat_data_summary,
+    )
 
     try:
         env = probe_environment(measure_wechat_size=True)
@@ -136,6 +141,8 @@ def _cmd_print_env_adaptation() -> None:
             layout_txt = {"wechat4": "微信 4.x（新版 Weixin）", "wechat3": "微信 3.x"}.get(layout, layout)
             loc = "roaming %APPDATA%/Tencent/xwechat" if wechat.get("roaming4") else "roaming %APPDATA%/Tencent/WeChat"
             _echo(f"    微信: {green(layout_txt)}（{loc} 运行缓存可清）")
+            for line in wechat_cleanable_summary(env):
+                _echo(f"      {green('·')} {dim(line)}")
             for line in wechat_data_summary(env):
                 _echo(f"      {yellow('⚠')} {dim(line)}")
     except Exception:  # noqa: BLE001
@@ -176,6 +183,16 @@ def _cmd_print_env_adaptation() -> None:
     except Exception:  # noqa: BLE001
         pass
 
+    # 需系统工具处理的组件库（本工具不删除，只报告体积与官方命令）
+    try:
+        lines = component_store_summary(env)
+        if lines:
+            _echo(f"    {bold('组件库/系统级空间（本工具不删除）')}")
+            for line in lines:
+                _echo(f"      {yellow('•')} {dim(line)}")
+    except Exception:  # noqa: BLE001
+        pass
+
 
 # ---------------------------------------------------------------------------
 # 一键体检
@@ -186,16 +203,24 @@ def _cmd_checkup(
     scan_depth: int,
     show_progress: bool,
     deep: bool = False,
+    workers: int = 0,
 ) -> int:
     """一键体检：只读汇总各项状态。"""
     _echo(bold(f"=== PC Junk Cleaner {__version__} 体检报告 ==="))
     mode_tag = "深度 (deep)" if deep else "标准"
-    _echo(dim(f"  扫描模式: {mode_tag} · 遍历深度 {scan_depth} 层"))
+    worker_tag = f" · 并行 {workers} 线程" if workers and workers > 1 else " · 串行扫描"
+    _echo(dim(f"  扫描模式: {mode_tag} · 遍历深度 {scan_depth} 层{worker_tag}"))
     _echo("")
 
     # 系统信息
     _echo(f"  {bold('系统状态')}")
-    _echo(f"    管理员权限: {'✓ ' + green('是') if is_admin() else '✗ ' + yellow('否（系统深度清理将跳过，可用 --admin 提权）')}")
+    if is_admin():
+        admin_txt = "✓ " + green("是")
+        if is_elevated():
+            admin_txt += dim(" [UAC 提权]")
+        _echo(f"    管理员权限: {admin_txt}")
+    else:
+        _echo(f"    管理员权限: ✗ {yellow('否（系统深度清理将跳过，可用 --admin 提权）')}")
     _echo(f"    回收站支持: {'✓ ' + green('是（删除可恢复）') if recycle_available() else '✗ ' + yellow('否（将永久删除，建议 pip install send2trash）')}")
     _echo("")
 
@@ -228,7 +253,12 @@ def _cmd_checkup(
     # 扫描可清理内容
     _echo(f"  {bold('可清理分类')}")
     progress = ScanProgressDisplay(enabled=show_progress)
-    results = scan_all(specs, scan_depth=scan_depth, on_progress=progress if show_progress else None)
+    results = scan_all(
+        specs,
+        scan_depth=scan_depth,
+        on_progress=progress if show_progress else None,
+        workers=workers,
+    )
     progress.finish(results)
 
     visible = [r for r in results if show_risky or r.risk != "risky"]

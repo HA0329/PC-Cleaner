@@ -51,11 +51,30 @@ DEFAULTS: dict[str, Any] = {
     "show_risky": False,             # 交互菜单是否显示高风险分类（需 --risky 或设为 true）
     "enable_history": True,          # 是否记录清理历史与审计日志
     "scan_depth": 20,                # find_dirs 遍历深度限制（默认 20 层）
+    "scan_workers": 4,               # 并行扫描线程数（1 = 串行；0 表示自动）
     "default_detail": False,         # 默认是否以详细模式显示扫描结果
     "default_sort": "size_desc",     # 默认排序方式：size_desc/size_asc/name_asc/count_desc
     "show_scan_progress": True,      # 扫描时是否显示进度提示
     "compact_tree_view": False,      # 是否默认使用紧凑树形视图
+    "all_includes_recycle_bin": False,  # --all 是否连带清空回收站（默认否，更安全）
 }
+
+
+def resolve_workers(cfg: dict[str, Any] | None = None) -> int:
+    """解析并行扫描线程数。
+
+    ``scan_workers``：1 表示串行；0 表示按 CPU 核数自动（上限 8）；
+    其它值直接使用（上限 16，避免开过多线程反而拖慢）。
+    """
+    if cfg is None:
+        cfg = load_config()
+    try:
+        raw = int(cfg.get("scan_workers", 4))
+    except (TypeError, ValueError):
+        raw = 4
+    if raw <= 0:
+        raw = min(os.cpu_count() or 4, 8)
+    return max(1, min(raw, 16))
 
 
 def load_config() -> dict[str, Any]:

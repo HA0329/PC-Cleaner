@@ -17,6 +17,16 @@
 - shred 兼容 Windows：os.O_SYNC 在 Windows 上不存在，改为条件启用，并用
   fsync 保证落盘；覆写完成后由调用方删除文件。
 - 非预期异常记录日志。
+
+v0.9.2 改进：
+- **实际释放量核算**：CLEAR 目标按删除前后体积差计入 ``freed``（此前用的是
+  扫描时的估计值，被占用/受保护文件也算进去了，导致"释放了 400MB"实际只有 200MB）；
+  ``audit`` 回调新增 ``freed`` 参数，审计日志不再恒为 0。
+- **部分失败不再静默**：清空目录时若有子项被占用，返回 ``skipped`` 计数；
+  一个子项都没删掉时计为 ``failed``，不再"假装成功"。
+- **重解析点保护**：删除前拒绝符号链接 / junction（含链接自身），
+  避免越界删到链接目标。
+- 回收站恢复成功后清理对应的 ``$I`` 元数据文件，避免残留孤立记录。
 """
 
 from __future__ import annotations
@@ -171,12 +181,20 @@ def _delete_path(
     安全增强：
     - 在操作前重新解析真实路径，并再次调用 _guard_path 做二次检查（TOCTOU）。
     - 所有删除操作基于 real 路径进行。
+    - 拒绝删除重解析点（符号链接 / junction）本身：删除链接目标会越界，
+      而删除链接自身容易让上层目录结构失效，一律跳过更安全。
     """
     # 重新解析真实路径
     try:
         real = path.resolve(strict=False)
     except (OSError, ValueError):
         raise PermissionError(f"无法解析路径: {path}")
+
+    # 重解析点保护：不跟随、也不删除链接本身
+    from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
+
+    if is_reparse_point(path) or is_reparse_point(real):
+        raise PermissionError(f"拒绝删除符号链接/联接（junction）: {path}")
 
     # 重新执行保护检查（防御窗口期内的篡改）
     # 对于删除子项，一律使用 DELETE 动作（因为 _delete_path 只负责删除自身）
@@ -199,7 +217,7 @@ def _delete_path(
             # 先覆写目录内所有文件（递归）
             for child in real.rglob("*"):
                 try:
-                    if child.is_file() and not child.is_symlink():
+                    if child.is_file() and not is_reparse_point(child):
                         _shred_file(child, passes=shred_passes)
                 except OSError:
                     continue
@@ -224,41 +242,56 @@ def _clear_dir_content(
     is_protected,
     shred: bool = False,
     shred_passes: int = 1,
-) -> None:
-    """清空目录内容（保留目录本身）。
+) -> tuple[int, int]:
+    """清空目录内容（保留目录本身），返回 (成功删除的子项数, 失败子项数)。
 
-    遍历目录下所有子项，对每个子项调用 _delete_path 删除。
+    逐项容错：单个子项被占用/无权限时计入失败并继续，不中断整个清空。
+    重解析点（符号链接 / junction）直接跳过（既不计成功也不计失败），
+    避免越界删除链接目标。
     """
+    from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
+
+    deleted = 0
+    failed = 0
     try:
-        for child in path.iterdir():
-            # 防御：清空时逐个跳过受保护子项（如缓存目录里混入的联接/用户数据）。
-            # 例外：位于白名单清空根（ALLOWED_CLEAR_ROOTS）之下的子项属于
-            # 「正在被清空的内容」，即使命中了名称级保护（如外层 .git）也应放行，
-            # 交由 _delete_path 的守卫做最终裁决。
-            if is_protected(child) and not is_within_clear_root(child):
-                continue
-            try:
-                child_is_dir = child.is_dir()
-            except OSError:
-                continue
-            try:
-                # 删除子项（无论文件还是目录，均为 DELETE 动作）
-                _delete_path(
-                    child,
-                    mode,
-                    is_dir=child_is_dir,
-                    recycle_fallback=recycle_fallback,
-                    is_protected=is_protected,
-                    shred=shred,
-                    shred_passes=shred_passes,
-                )
-                on_progress(child)
-            except (PermissionError, OSError):
-                # 被占用或无权限，跳过
-                continue
+        children = list(path.iterdir())
     except OSError:
-        # 目录本身无法访问，跳过
-        pass
+        return (0, 0)
+    for child in children:
+        try:
+            if is_reparse_point(child):
+                continue
+        except OSError:
+            continue
+        # 防御：清空时逐个跳过受保护子项（如缓存目录里混入的联接/用户数据）。
+        # 例外：位于白名单清空根（ALLOWED_CLEAR_ROOTS）之下的子项属于
+        # 「正在被清空的内容」，即使命中了名称级保护（如外层 .git）也应放行，
+        # 交由 _delete_path 的守卫做最终裁决。
+        if is_protected(child) and not is_within_clear_root(child):
+            continue
+        try:
+            child_is_dir = child.is_dir()
+        except OSError:
+            failed += 1
+            continue
+        try:
+            # 删除子项（无论文件还是目录，均为 DELETE 动作）
+            _delete_path(
+                child,
+                mode,
+                is_dir=child_is_dir,
+                recycle_fallback=recycle_fallback,
+                is_protected=is_protected,
+                shred=shred,
+                shred_passes=shred_passes,
+            )
+            deleted += 1
+            on_progress(child)
+        except (PermissionError, OSError):
+            # 被占用或无权限，跳过
+            failed += 1
+            continue
+    return (deleted, failed)
 
 
 # ===========================================================================
@@ -271,11 +304,17 @@ def delete_targets(
     recycle_fallback: bool | None = None,
     shred: bool = False,
     shred_passes: int = 1,
-    audit: Callable[[Path, int, str], None] | None = None,
+    audit: Callable[[Path, int, str, int], None] | None = None,
 ) -> dict[str, int]:
     """执行删除。
 
-    返回 ``{"deleted": n, "failed": n, "freed": bytes}``。
+    返回 ``{"deleted": n, "failed": n, "freed": bytes, "skipped": n}``。
+
+    - ``deleted``：成功处理的目标数（COMPACT 目标也算一次成功处理）；
+    - ``failed``：抛错/完全没能清理的目标数；
+    - ``freed``：**实际释放**的字节数（CLEAR 用删除前后体积差，而不是扫描时
+      的估计值；目录里被占用/受保护的文件不会被算进去）；
+    - ``skipped``：部分成功（清空目录时有子项被占用）的目标数。
 
     ``recycle_fallback``：进回收站失败时是否回退为永久删除。
     ``None`` 时读取配置 ``recycle_error_fallback``（默认 False，即失败就保留）。
@@ -284,7 +323,8 @@ def delete_targets(
 
     ``shred_passes``：覆写遍数（默认 1，上限 7），仅 ``shred=True`` 时生效。
 
-    ``audit``：每成功删除一个目标时回调 ``(path, size, mode)``，用于审计日志/历史。
+    ``audit``：每成功处理一个目标时回调 ``(path, size, mode, freed)``，
+    用于审计日志/历史（``freed`` 为该目标实际释放的字节数）。
     """
     if recycle_fallback is None:
         recycle_fallback = bool(load_config().get("recycle_error_fallback", False))
@@ -292,10 +332,11 @@ def delete_targets(
 
     is_protected = make_protect_check()
     on_progress = on_progress or (lambda i, total, msg: None)
-    audit = audit or (lambda path, size, mode_name: None)
+    audit = audit or (lambda path, size, mode_name, freed: None)
     total = len(targets)
     deleted = 0
     failed = 0
+    skipped = 0
     freed = 0
     for i, t in enumerate(targets, start=1):
         try:
@@ -306,7 +347,7 @@ def delete_targets(
                 # 数据库压缩：VACUUM 重写文件，不删除数据
                 freed_here = compact_database(t.path)
                 freed += freed_here
-                audit(t.path, t.size, "compact")
+                audit(t.path, t.size, "compact", freed_here)
             elif t.kind is TargetKind.FILE:
                 _delete_path(
                     t.path,
@@ -318,22 +359,30 @@ def delete_targets(
                     shred_passes=shred_passes,
                 )
                 freed += t.size
-                audit(t.path, t.size, mode.value)
+                audit(t.path, t.size, mode.value, t.size)
             elif t.action is TargetAction.CLEAR:
                 # 清空目录内容（保留目录本身）
                 before = _dir_size_now(t.path)
-                _clear_dir_content(
+                _cleared, clear_failed = _clear_dir_content(
                     t.path,
                     mode,
-                    lambda p: None,
+                    on_progress=lambda p: None,
                     recycle_fallback=recycle_fallback,
                     is_protected=is_protected,
                     shred=shred,
                     shred_passes=shred_passes,
                 )
                 after = _dir_size_now(t.path)
-                freed += max(before - after, 0)
-                audit(t.path, t.size, mode.value)
+                freed_here = max(before - after, 0)
+                freed += freed_here
+                audit(t.path, t.size, mode.value, freed_here)
+                if clear_failed and freed_here == 0:
+                    # 一个都没删掉：计入失败，避免"假装成功"
+                    failed += 1
+                    on_progress(i, total, f"[跳过] {t.path}（{clear_failed} 个子项被占用）")
+                    continue
+                if clear_failed:
+                    skipped += 1
             else:  # DELETE directory
                 _delete_path(
                     t.path,
@@ -345,7 +394,7 @@ def delete_targets(
                     shred_passes=shred_passes,
                 )
                 freed += t.size
-                audit(t.path, t.size, mode.value)
+                audit(t.path, t.size, mode.value, t.size)
             deleted += 1
             on_progress(i, total, t.describe())
         except (PermissionError, OSError, FileNotFoundError) as exc:
@@ -356,16 +405,18 @@ def delete_targets(
             logger.exception("删除目标 %s 时发生非预期异常: %s", t.path, exc)
             failed += 1
             on_progress(i, total, f"[错误] {t.path} (异常: {exc})")
-    return {"deleted": deleted, "failed": failed, "freed": freed}
+    return {"deleted": deleted, "failed": failed, "freed": freed, "skipped": skipped}
 
 
 def _dir_size_now(path: Path) -> int:
-    """快速计算目录当前大小（用于 CLEAR 模式的前后对比）。"""
+    """快速计算目录当前大小（用于 CLEAR 模式的前后对比）。不跟随重解析点。"""
+    from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
+
     total = 0
     try:
         for child in path.rglob("*"):
             try:
-                if child.is_file():
+                if child.is_file() and not is_reparse_point(child):
                     total += child.stat().st_size
             except OSError:
                 continue
@@ -442,20 +493,29 @@ def empty_recycle_bin() -> dict[str, int]:
 def _parse_recycle_info(info_path: Path) -> tuple[str, int] | None:
     """解析回收站 ``$I<name>`` 元数据文件，返回 (原始路径, 文件大小)。
 
-    格式：8 字节头 + QWORD 文件大小(offset 8) + QWORD 删除时间(offset 16)
-    + UTF-16LE 原始完整路径(offset 24 起)。解析失败返回 None。
+    格式（Win10/11 实测，v0.9.2 修正）::
 
-    兼容性说明：该格式是 Windows 内部实现（Win10/11 实测一致），解析对
-    损坏/截断/权限拒绝的数据做容错，返回 None 而不是抛异常。
+        offset 0  : 8 字节头（$I 版本标识）
+        offset 8  : QWORD 文件大小
+        offset 16 : QWORD 删除时间（FILETIME）
+        offset 24 : DWORD 目录记录长度（**仅当该记录是目录时非 0**）
+        offset 28 : UTF-16LE 原始完整路径 + 2 字节空终结符
+
+    旧实现从 offset 24 读路径，对**目录**记录会把长度字段的低字节
+    （如 ``b'd\\x00'``）当成第一个字符，导致 ``--undo-last`` 永远匹配不上
+    原路径（本机实测：恢复全部跳过）。现在固定从 offset 28 读，
+    并兼容长度字段恰好落在路径起始处的畸形数据。
+
+    解析失败返回 None（对损坏/截断/权限拒绝做容错，不抛异常）。
     """
     try:
         data = info_path.read_bytes()
     except OSError:
         return None
-    if len(data) < 24:
+    if len(data) < 28:
         return None
     size = int.from_bytes(data[8:16], "little", signed=False)
-    raw = data[24:]
+    raw = data[28:]
     # 原始路径是 UTF-16LE + 2 字节空终结符；去掉终结符后必须是偶数长度
     if raw.endswith(b"\x00\x00"):
         raw = raw[:-2]
@@ -512,7 +572,13 @@ def restore_paths(paths: list[str], drives: list[str] | None = None) -> dict[str
     """把仍在回收站中的原始路径恢复回原位。
 
     返回 ``{"restored": [路径...], "skipped": [原因...]}``。
-    仅当文件确实还在回收站且原位置不存在同名文件时才恢复。
+
+    匹配规则（v0.9.2 增强）：
+    - 回收站里存的是**目标本身**（``$I`` 记录的路径 == 目标路径）→ 直接还原；
+    - 回收站里存的是目标的**某个父目录**（send2trash 删除目录时会把该目录整体
+      移入回收站，``$I`` 只记录父目录）→ 把该父目录整体还原，并报告已还原的
+      父目录路径（子路径随之恢复）。
+    仅当原位置不存在同名文件时才恢复，避免覆盖用户新数据。
     """
     if sys.platform != "win32":
         return {"restored": [], "skipped": ["非 Windows 平台"]}
@@ -521,26 +587,75 @@ def restore_paths(paths: list[str], drives: list[str] | None = None) -> dict[str
     for e in entries:
         by_orig.setdefault(e["original"].lower(), e)
 
+    def _restore_one(e: dict, target: Path, requested: Path) -> None:
+        """把一条回收站记录还原到 ``target``（记录内已确认 target 不存在）。"""
+        data = e["data"]
+        if not data.exists():
+            skipped.append(f"{target}（数据文件缺失）")
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(data), str(target))
+            restored.append(str(target))
+            # 清理对应的 $I 元数据，避免回收站里留下指向不存在数据的孤立记录
+            try:
+                info = e.get("info")
+                if info is not None and Path(info).exists():
+                    Path(info).unlink()
+            except OSError:
+                pass
+        except (OSError, shutil.Error) as exc:
+            skipped.append(f"{target}（恢复失败: {exc}）")
+
     restored: list[str] = []
     skipped: list[str] = []
     for raw_path in paths:
         p = Path(raw_path)
         key = str(p).lower()
         e = by_orig.get(key)
-        if e is None:
-            skipped.append(f"{p}（回收站中已不存在，可能已被手动删除）")
+        if e is not None:
+            if p.exists():
+                skipped.append(f"{p}（原位置已有同名文件，已保留回收站副本）")
+            else:
+                _restore_one(e, p, p)
             continue
-        if p.exists():
-            skipped.append(f"{p}（原位置已有同名文件，已保留回收站副本）")
+
+        # 回退 1：目标本身不在，但它的某个**父目录**被整体回收（send2trash
+        # 删除目录时 $I 记录的是父目录）→ 还原该父目录，子路径随之恢复。
+        parent_hit: dict | None = None
+        parent_path = p
+        cur = p.parent
+        while len(cur.parts) > 1:
+            parent_hit = by_orig.get(str(cur).lower())
+            if parent_hit is not None:
+                parent_path = cur
+                break
+            cur = cur.parent
+        if parent_hit is not None:
+            if parent_path.exists():
+                skipped.append(f"{parent_path}（原位置已有同名文件，已保留回收站副本）")
+            else:
+                _restore_one(parent_hit, parent_path, p)
             continue
-        data = e["data"]
-        if not data.exists():
-            skipped.append(f"{p}（数据文件缺失）")
+
+        # 回退 2：目标目录的**内容**被逐个回收（send2trash 逐子项删除时
+        # $I 记录的是子项）→ 把所有位于该目录下的记录逐条还原。
+        prefix = key.rstrip("\\/") + os.sep
+        children = [e for k, e in by_orig.items() if k.startswith(prefix)]
+        if children:
+            done = 0
+            for child in children:
+                child_target = Path(child["original"])
+                if child_target.exists():
+                    skipped.append(f"{child_target}（原位置已有同名文件，已保留回收站副本）")
+                    continue
+                before = len(restored)
+                _restore_one(child, child_target, p)
+                if len(restored) > before:
+                    done += 1
+            if done == 0:
+                skipped.append(f"{p}（回收站中的子项均无法恢复）")
             continue
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(data), str(p))
-            restored.append(str(p))
-        except (OSError, shutil.Error) as exc:
-            skipped.append(f"{p}（恢复失败: {exc}）")
+
+        skipped.append(f"{p}（回收站中已不存在，可能已被手动删除）")
     return {"restored": restored, "skipped": skipped}

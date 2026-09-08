@@ -19,6 +19,19 @@ v0.8.3 修复（安全）：
   （windows\\system32、weixinshuju、.git 等）按路径组件全等匹配任意层——
   修复旧实现把相对模式展开成"相对当前工作目录"导致真实系统路径失去保护。
 - 白名单清空根内的路径放行；不再对不存在的路径一律保守拒绝。
+
+v0.9.2 改进：
+- **嵌套目标去重**（修复重复计数）：``%LOCALAPPDATA%/npm-cache`` 与其子目录
+  ``_npx`` 同时命中时，子目标体积会被重复计入「可释放空间」。现在父目录目标
+  覆盖其子目录目标（``_drop_subsumed``），分类内与跨分类都生效。
+- ``_dir_size`` 对**受保护子树整棵剪枝**（此前只跳过目录节点本身），既让体积
+  统计更准确（受保护内容本来就不会被删除），也明显更快。
+- 新增重解析点统一判定 ``is_reparse_point``（符号链接 + Windows junction），
+  遍历、体积统计、空目录扫描一律不跟随。
+- 新增 target 类型：``empty_dirs``（空目录）、``zero_byte_files``（0 字节残留）；
+  ``glob_files`` / ``files_by_rule`` 支持 ``ext`` 扩展名过滤。
+- 新增并行扫描 ``scan_all(workers=N)``：目录遍历 I/O 密集，多线程显著提速，
+  结果顺序仍与规则顺序一致。
 """
 
 from __future__ import annotations
@@ -30,7 +43,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .models import CategoryResult, Target, TargetAction, TargetKind, format_size
+from .models import CategoryResult, Target, TargetAction, TargetKind, format_size  # noqa: F401
 from .rules import (
     DEFAULT_SKIP_DIRNAMES,
     category_label,
@@ -77,6 +90,25 @@ def is_admin() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:  # noqa: BLE001
         return False
+
+
+def is_reparse_point(path: Path) -> bool:
+    """路径是否为符号链接 / junction（重解析点）。
+
+    安全增强：删除与统计都不应跟随重解析点——否则可能越界删到链接目标，
+    或把链接指向的目录体积算进来（导致「可释放空间」虚高）。
+    """
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:
+        return True  # 无法判断时保守视为链接，避免误删
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    # FILE_ATTRIBUTE_REPARSE_POINT = 0x400（Windows）
+    return bool(getattr(st, "st_file_attributes", 0) & 0x400)
 
 
 # ===========================================================================
@@ -223,15 +255,13 @@ def _walk_dir(
         try:
             with os.scandir(path) as it:
                 for entry in it:
+                    child = Path(entry.path)
                     try:
                         # 不跟随符号链接/联接（junction），避免越界误删或造成指数级扫描
-                        is_link = entry.is_symlink() or (
-                            hasattr(entry, "is_junction") and entry.is_junction()
-                        )
+                        is_link = is_reparse_point(child)
                         is_dir = entry.is_dir(follow_symlinks=False)
                     except OSError:
                         continue
-                    child = Path(entry.path)
                     if is_protected(child):
                         continue
                     if is_dir:
@@ -262,9 +292,12 @@ def _dir_size(
 ) -> tuple[int, int]:
     """计算目录内可清理的字节数与文件数量（不跟随链接、跳过受保护项）。
 
-    注意：此函数统计目录下**所有**文件（除受保护路径外），
-    不会跳过 node_modules、__pycache__ 等，以保证空间统计准确。
-    若需加速，可考虑设置 max_depth 限制，但当前保持完整遍历。
+    语义要点（v0.9.2 修正）：
+    - 统计目录下**所有非受保护**的文件（不跳过 node_modules / __pycache__ 等，
+      以保证「可释放空间」不低估）；
+    - **受保护子目录整棵子树直接排除**：受保护内容不会被删除，若计入体积会让
+      「可释放」虚高（例如缓存目录里混入的 .git / 微信数据目录）。这一改动同时
+      避免了把时间浪费在统计注定要跳过的巨型目录上。
 
     ``memo``：同一扫描内的全局大小缓存（key 为规范化绝对路径）。
     同一目录被多个规则命中时只递归遍历一次，避免重复统计（目录内容
@@ -275,20 +308,43 @@ def _dir_size(
         hit = memo.get(key)
         if hit is not None:
             return hit
-    total = 0
-    count = 0
-    # ★ 关键：传入空集合，不跳过任何特定目录名，只跳过受保护路径
-    for child, is_dir in _walk_dir(path, is_protected, skip_names=set(), max_depth=None):
-        if is_dir:
-            continue
+    # 递归统计：自底向上把**每个子目录**的结果也写入 memo，父目录测一次后，
+    # 子目录规则（如 npm-cache 与 npm-cache/_npx 同时命中）直接命中缓存。
+    def _measure(cur: Path, depth: int) -> tuple[int, int]:
+        if depth > 128:  # 深度保护（重解析点已跳过，正常不会触发）
+            return (0, 0)
+        key = normalize(cur)
+        if memo is not None:
+            hit = memo.get(key)
+            if hit is not None:
+                return hit
+        total = 0
+        count = 0
         try:
-            total += child.stat().st_size
-            count += 1
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        child = Path(entry.path)
+                        if is_reparse_point(child):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if is_protected(child):
+                                continue  # 整棵子树剪枝
+                            st, sc = _measure(child, depth + 1)
+                            total += st
+                            count += sc
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_size
+                            count += 1
+                    except OSError:
+                        continue
         except OSError:
-            continue
-    if memo is not None:
-        memo[key] = (total, count)
-    return total, count
+            pass
+        if memo is not None:
+            memo[key] = (total, count)
+        return total, count
+
+    return _measure(path, 0)
 
 
 # ===========================================================================
@@ -301,6 +357,7 @@ def _filter_and_build_file_targets(
     min_size_bytes: int = 0,
     older_than_secs: int = 0,
     label: str = "",
+    ext_filter: set[str] | None = None,
 ) -> list[Target]:
     """从文件路径迭代器中筛选符合条件的文件，构造 Target 列表。
 
@@ -314,6 +371,7 @@ def _filter_and_build_file_targets(
         min_size_bytes: 最小体积阈值（字节），0 表示不限制
         older_than_secs: 最旧修改时间阈值（秒），0 表示不限制
         label: 目标标签
+        ext_filter: 允许的扩展名集合（小写、带点），None 表示不限制
 
     Returns:
         list[Target]: 满足条件的文件 Target 列表
@@ -327,6 +385,8 @@ def _filter_and_build_file_targets(
         except OSError:
             continue
         if is_protected(p):
+            continue
+        if ext_filter is not None and p.suffix.lower() not in ext_filter:
             continue
         try:
             st = p.stat()
@@ -349,6 +409,31 @@ def _filter_and_build_file_targets(
             )
         )
     return targets
+
+
+def _parse_ext_set(spec: dict[str, Any]) -> set[str] | None:
+    """把规则里的 ``ext`` 字段解析为小写带点扩展名集合。
+
+    支持 ``ext`` 为列表或逗号分隔字符串（如 ``[".log", "tmp"]`` / ``".log,.tmp"``）。
+    """
+    raw = spec.get("ext")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        items = raw.replace("，", ",").replace(";", ",").split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        return None
+    out: set[str] = set()
+    for item in items:
+        e = str(item).strip().lower()
+        if not e:
+            continue
+        if not e.startswith("."):
+            e = "." + e
+        out.add(e)
+    return out or None
 
 
 # ===========================================================================
@@ -472,6 +557,7 @@ def _scan_glob_files(
         min_size_bytes=min_size_bytes,
         older_than_secs=older_than_secs,
         label=label,
+        ext_filter=_parse_ext_set(spec),
     )
 
 
@@ -514,6 +600,14 @@ def _scan_find_dirs(
     bases = _resolve_bases(spec)
     if not bases:
         return []
+    # 规则可自带 max_depth（取与全局 scan_depth 的较小值），
+    # 例如 Steam 库只需下探 3 层即可找到 shadercache，避免遍历上百 GB 游戏文件。
+    try:
+        rule_depth = int(spec.get("max_depth") or 0)
+    except (TypeError, ValueError):
+        rule_depth = 0
+    if rule_depth > 0:
+        max_depth = min(max_depth, rule_depth)
     action = (
         TargetAction.CLEAR
         if spec.get("action", "delete") == "clear"
@@ -538,6 +632,8 @@ def _scan_find_dirs(
                     continue
                 seen.add(key)
                 size, count = _dir_size(child, is_protected, memo=size_memo)
+                if size == 0 and count == 0:
+                    continue  # 空目录无空间可释放，不占预览位置
                 targets.append(
                     Target(
                         path=child,
@@ -558,27 +654,146 @@ def _scan_files_by_rule(
     base_str = spec.get("base", "")
     if not base_str:
         return []
-    import time
-
     base = expand_path(base_str)
     if not base.exists() or not base.is_dir():
         return []
     label = spec.get("label", "")
     min_size_bytes = int(spec.get("min_size_mb", 0) or 0) * 1024 * 1024
     older_than_secs = int(spec.get("older_than_days", 0) or 0) * 86400
+    ext_filter = _parse_ext_set(spec)
+    pattern = spec.get("pattern")
 
     # 使用 _walk_dir 生成所有文件路径，传入空集合以不跳过任何子目录（确保完整覆盖）
     file_paths = (child for child, is_dir in _walk_dir(base, is_protected, skip_names=set()) if not is_dir)
 
     # 复用公共过滤函数
-    return _filter_and_build_file_targets(
+    targets = _filter_and_build_file_targets(
         file_paths,
         category_key,
         is_protected,
         min_size_bytes=min_size_bytes,
         older_than_secs=older_than_secs,
         label=label,
+        ext_filter=ext_filter,
     )
+    if pattern:
+        # 额外按通配符过滤（如 base 下只需 *.log）：用 fnmatch 匹配文件名
+        import fnmatch
+
+        targets = [t for t in targets if fnmatch.fnmatch(t.path.name.lower(), pattern.lower())]
+    return targets
+
+
+def _scan_empty_dirs(
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
+) -> list[Target]:
+    """扫描 base 下的空目录（自底向上，父目录因子目录被删也可能变空）。
+
+    ``min_age_days``：只处理修改时间早于 N 天的空目录（默认 0 = 不限制），
+    避免删掉刚创建、程序正要写入的临时目录。
+    受保护目录、重解析点、base 自身一律不产出。
+    """
+    base_str = spec.get("base", "")
+    if not base_str:
+        return []
+    base = expand_path(base_str)
+    if not base.exists() or not base.is_dir():
+        return []
+    if is_protected(base):
+        return []
+    label = spec.get("label", "")
+    min_age_days = int(spec.get("min_age_days", 0) or 0)
+    cutoff = time.time() - min_age_days * 86400 if min_age_days > 0 else None
+
+    # 收集所有子目录（深度优先，自底向上判断，便于父目录连带判定）
+    dirs: list[Path] = []
+    for child, is_dir in _walk_dir(base, is_protected, skip_names=set()):
+        if is_dir:
+            dirs.append(child)
+    dirs.sort(key=lambda p: len(p.parts), reverse=True)
+
+    empty_now: set[str] = set()
+    targets: list[Target] = []
+    for d in dirs:
+        if is_protected(d) or is_reparse_point(d):
+            continue
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        # 只把「没有条目」或「条目都是已被判定为空目录的子目录」视为空
+        still_has_content = False
+        for e in entries:
+            try:
+                if e.is_dir(follow_symlinks=False) and normalize(Path(e.path)) in empty_now:
+                    continue
+            except OSError:
+                pass
+            still_has_content = True
+            break
+        if still_has_content:
+            continue
+        if cutoff is not None:
+            try:
+                if d.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+        empty_now.add(normalize(d))
+        targets.append(
+            Target(
+                path=d,
+                kind=TargetKind.DIR,
+                action=TargetAction.DELETE,
+                category=category_key,
+                size=0,
+                file_count=0,
+                label=label,
+            )
+        )
+    return targets
+
+
+def _scan_zero_byte_files(
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
+) -> list[Target]:
+    """扫描 base 下的 0 字节残留文件（安装中断/日志轮转留下的空壳）。"""
+    base_str = spec.get("base", "")
+    if not base_str:
+        return []
+    base = expand_path(base_str)
+    if not base.exists() or not base.is_dir():
+        return []
+    label = spec.get("label", "")
+    older_than_secs = int(spec.get("older_than_days", 0) or 0) * 86400
+    ext_filter = _parse_ext_set(spec)
+    now = time.time()
+    targets: list[Target] = []
+    for child, is_dir in _walk_dir(base, is_protected, skip_names=set()):
+        if is_dir or is_protected(child):
+            continue
+        if ext_filter is not None and child.suffix.lower() not in ext_filter:
+            continue
+        try:
+            st = child.stat()
+        except OSError:
+            continue
+        if st.st_size != 0:
+            continue
+        if older_than_secs > 0 and (now - st.st_mtime) < older_than_secs:
+            continue
+        targets.append(
+            Target(
+                path=child,
+                kind=TargetKind.FILE,
+                action=TargetAction.DELETE,
+                category=category_key,
+                size=0,
+                file_count=1,
+                label=label,
+            )
+        )
+    return targets
 
 
 def _scan_compact_db(
@@ -637,50 +852,93 @@ _TARGET_HANDLERS = {
     "glob_files": _scan_glob_files,
     "files_by_rule": _scan_files_by_rule,
     "compact_db": _scan_compact_db,
+    "empty_dirs": _scan_empty_dirs,
+    "zero_byte_files": _scan_zero_byte_files,
 }
 
 
-def scan_spec(
-    spec: dict[str, Any],
-    is_protected=None,
-    scan_depth: int = 20,
-    on_progress: ScanProgressCB | None = None,
-    progress_idx: int = 0,
-    progress_total: int = 0,
-    size_memo: dict[str, tuple[int, int]] | None = None,
-) -> CategoryResult:
-    """扫描单个分类规格，返回 CategoryResult。
+# ===========================================================================
+# 目标包含关系（子目标去重）——修复「嵌套目标重复计数」
+# ===========================================================================
+def _is_under(child: Path, parent: Path) -> bool:
+    """child 是否严格位于 parent 之下（同路径不算）。"""
+    c = normalize(child)
+    p = normalize(parent)
+    return c != p and c.startswith(p + os.sep)
 
-    ``size_memo``：跨 target/分类共享的目录大小缓存（见 ``_dir_size``）；
-    None 时在本分类内新建一个。
+
+def _drop_subsumed(
+    targets: list[Target],
+    accepted: list[Target] | None = None,
+) -> tuple[list[Target], int]:
+    """剔除被同批次「目录型目标」完整覆盖的子目标，返回 (保留列表, 剔除数)。
+
+    问题背景：``dev_caches`` 里 ``%LOCALAPPDATA%/npm-cache`` 与
+    ``npm-cache/_npx`` 同时命中时，``_npx`` 的字节数会被统计两次，
+    「可释放空间」虚高（本机实测 413MB 被重复计入）。
+
+    规则：
+    - 只让 **DIR 目标**（clear/delete）覆盖其子路径；文件目标不覆盖任何东西；
+    - COMPACT 目标（数据库压缩）不参与覆盖关系——压缩与删除是两种意图，
+      且压缩目标都是单个文件，与目录目标不冲突；
+    - ``accepted`` 允许传入「已经接受的上游目标」（跨分类去重用）。
     """
-    key = spec["key"]
-    label = spec.get("label") or category_label(key)
-    if is_protected is None:
-        is_protected = make_protect_check()
-    if size_memo is None:
-        size_memo = {}
+    pool = list(accepted or [])
+    kept: list[Target] = []
+    dropped_idx: set[int] = set()
+    # 先让父目录/体积大的目标入池，避免「子目录先到」导致父目录被误判
+    for idx, t in _sort_targets_for_subsumption(list(enumerate(targets))):
+        # COMPACT（数据库压缩）与删除是两种意图：既不覆盖子项、也不被覆盖，
+        # 否则「只压缩浏览器数据库」会被同一路径的删除类目标吞掉。
+        if t.action is TargetAction.COMPACT:
+            continue
+        # 已被池中某个父目录目标覆盖 → 剔除（不重复计入体积）
+        if any(
+            p.kind is TargetKind.DIR
+            and p.action is not TargetAction.COMPACT
+            and _is_under(t.path, p.path)
+            for p in pool
+        ):
+            dropped_idx.add(idx)
+            continue
+        # 目录型目标（清空/删除）本身入池，后续子项与它比较
+        if t.kind is TargetKind.DIR:
+            pool.append(t)
+    for idx, t in enumerate(targets):
+        if idx in dropped_idx:
+            continue
+        kept.append(t)
+    return kept, len(dropped_idx)
 
-    t0 = time.time()
 
-    result = CategoryResult(
-        key=key,
-        label=label,
-        risk=str(spec.get("risk") or "safe"),
-        requires_admin=spec_requires_admin(spec),
+def _sort_targets_for_subsumption(
+    indexed: list[tuple[int, Target]],
+) -> list[tuple[int, Target]]:
+    """按「目录优先、路径层级浅优先、体积大优先」排序，便于父目标先入池。"""
+    return sorted(
+        indexed,
+        key=lambda pair: (
+            0 if pair[1].kind is TargetKind.DIR else 1,
+            len(pair[1].path.parts),
+            -pair[1].size,
+        ),
     )
 
-    if on_progress:
-        on_progress(label, progress_idx, progress_total)
 
-    # 需要管理员权限但当前未提权：跳过扫描并给出提示
-    if result.requires_admin and not is_admin():
-        result.admin_blocked = True
-        result.scanned = True
-        result.scan_duration = time.time() - t0
-        return result
+def _collect_spec_targets(
+    spec: dict[str, Any],
+    is_protected,
+    scan_depth: int,
+    size_memo: dict[str, tuple[int, int]],
+    result: CategoryResult,
+) -> list[Target]:
+    """展开一个分类的所有 target 规则，返回去重后的 Target 列表。
 
+    本函数只做扫描（无副作用），供 ``scan_spec`` 与并行 ``scan_all`` 复用。
+    """
+    key = spec["key"]
     seen: set[str] = set()
+    collected: list[Target] = []
     for target_spec in spec.get("targets", []):
         ttype = target_spec.get("type")
         # find_dirs 特殊处理，传入 max_depth
@@ -718,16 +976,74 @@ def scan_spec(
             if tpath in seen:
                 continue
             seen.add(tpath)
-            result.targets.append(t)
+            collected.append(t)
+    return collected
+
+
+def scan_spec(
+    spec: dict[str, Any],
+    is_protected=None,
+    scan_depth: int = 20,
+    on_progress: ScanProgressCB | None = None,
+    progress_idx: int = 0,
+    progress_total: int = 0,
+    size_memo: dict[str, tuple[int, int]] | None = None,
+) -> CategoryResult:
+    """扫描单个分类规格，返回 CategoryResult。
+
+    ``size_memo``：跨 target/分类共享的目录大小缓存（见 ``_dir_size``）；
+    None 时在本分类内新建一个。
+    分类内部同样做「嵌套目标去重」：父目录目标覆盖其子目录目标，避免同一份
+    空间被重复计入（见 ``_drop_subsumed``）。
+    """
+    key = spec["key"]
+    label = spec.get("label") or category_label(key)
+    if is_protected is None:
+        is_protected = make_protect_check()
+    if size_memo is None:
+        size_memo = {}
+
+    t0 = time.time()
+
+    result = CategoryResult(
+        key=key,
+        label=label,
+        risk=str(spec.get("risk") or "safe"),
+        requires_admin=spec_requires_admin(spec),
+    )
+
+    if on_progress:
+        on_progress(label, progress_idx, progress_total)
+
+    # 需要管理员权限但当前未提权：跳过扫描并给出提示
+    if result.requires_admin and not is_admin():
+        result.admin_blocked = True
+        result.scanned = True
+        result.scan_duration = time.time() - t0
+        return result
+
+    collected = _collect_spec_targets(spec, is_protected, scan_depth, size_memo, result)
+    result.targets, _dropped = _drop_subsumed(collected)
     result.scanned = True
     result.scan_duration = time.time() - t0
     return result
+
+
+def _scan_one_spec_parallel(
+    spec: dict[str, Any],
+    is_protected,
+    scan_depth: int,
+    size_memo: dict[str, tuple[int, int]],
+) -> CategoryResult:
+    """并行扫描辅助函数（不触发进度回调，进度由主线程汇总输出）。"""
+    return scan_spec(spec, is_protected, scan_depth=scan_depth, size_memo=size_memo)
 
 
 def scan_all(
     specs: list[dict[str, Any]],
     scan_depth: int = 20,
     on_progress: ScanProgressCB | None = None,
+    workers: int = 0,
 ) -> list[CategoryResult]:
     """扫描所有分类（不含回收站），返回结果列表。
 
@@ -737,26 +1053,63 @@ def scan_all(
     例外：**COMPACT（数据库压缩）目标不参与删除类去重** —— 压缩与删除是两种
     不同意图，用户可能只选 ``database_compact`` 而删除类分类先行占用了同一路径，
     此时应保留 COMPACT 目标（对 COMPACT 自身单独去重即可）。
+
     ``scan_depth``：find_dirs 遍历深度限制（默认 20 层）。
     ``on_progress``：扫描进度回调 (category_label, current_idx, total)。
+    ``workers``：并行扫描线程数（>1 时启用；目录遍历是 I/O 密集，线程池即可提速）。
+    结果顺序始终与 ``specs`` 顺序一致，与 ``workers`` 取值无关。
     """
     is_protected = make_protect_check()
     size_memo: dict[str, tuple[int, int]] = {}
-    results: list[CategoryResult] = []
+    scan_specs = [s for s in specs if s.get("key") != "recycle_bin"]
+    total = len(scan_specs)
+
+    if workers and workers > 1 and total > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        slots: list[CategoryResult | None] = [None] * total
+        with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+            futures = {
+                pool.submit(
+                    _scan_one_spec_parallel, spec, is_protected, scan_depth, size_memo
+                ): i
+                for i, spec in enumerate(scan_specs)
+            }
+            for fut, idx in futures.items():
+                try:
+                    slots[idx] = fut.result()
+                except Exception as exc:  # noqa: BLE001 单分类失败不影响其它分类
+                    logger.exception("分类扫描线程异常: %s", exc)
+                    spec = scan_specs[idx]
+                    slots[idx] = CategoryResult(
+                        key=str(spec.get("key") or "?"),
+                        label=spec.get("label") or category_label(str(spec.get("key") or "?")),
+                        risk=str(spec.get("risk") or "safe"),
+                        scanned=True,
+                    )
+        ordered = [r for r in slots if r is not None]
+        if on_progress:
+            for i, r in enumerate(ordered, start=1):
+                on_progress(r.label, i, total)
+    else:
+        ordered = []
+        for idx, spec in enumerate(scan_specs, start=1):
+            ordered.append(
+                scan_spec(
+                    spec, is_protected,
+                    scan_depth=scan_depth,
+                    on_progress=on_progress,
+                    progress_idx=idx,
+                    progress_total=total,
+                    size_memo=size_memo,
+                )
+            )
+
+    # 跨分类去重 + 跨分类嵌套目标去重（父目录目标覆盖子目录目标）
     seen_paths: set[str] = set()
     seen_compact: set[str] = set()
-    total = len(specs)
-    for idx, spec in enumerate(specs, start=1):
-        if spec.get("key") == "recycle_bin":
-            continue
-        res = scan_spec(
-            spec, is_protected,
-            scan_depth=scan_depth,
-            on_progress=on_progress,
-            progress_idx=idx,
-            progress_total=total,
-            size_memo=size_memo,
-        )
+    accepted_dirs: list[Target] = []
+    for res in ordered:
         deduped: list[Target] = []
         for t in res.targets:
             key = normalize(t.path)
@@ -764,14 +1117,20 @@ def scan_all(
                 if key in seen_compact:
                     continue
                 seen_compact.add(key)
-            else:
-                if key in seen_paths:
-                    continue
-                seen_paths.add(key)
+                deduped.append(t)
+                continue
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
             deduped.append(t)
+        deduped, _dropped = _drop_subsumed(deduped, accepted=accepted_dirs)
+        accepted_dirs.extend(
+            t
+            for t in deduped
+            if t.kind is TargetKind.DIR and t.action is not TargetAction.COMPACT
+        )
         res.targets = deduped
-        results.append(res)
-    return results
+    return ordered
 
 
 def recycle_bin_size() -> int:
@@ -783,13 +1142,29 @@ def recycle_bin_size() -> int:
         root = Path(drive) / "$Recycle.Bin"
         if not root.is_dir():
             continue
+        total += _tree_size_no_links(root)
+    return total
+
+
+def _tree_size_no_links(root: Path) -> int:
+    """统计目录树字节数（不跟随重解析点，逐项容错）。"""
+    total = 0
+    stack = [root]
+    while stack:
+        cur = stack.pop()
         try:
-            for child in root.rglob("*"):
-                try:
-                    if child.is_file() and not child.is_symlink():
-                        total += child.stat().st_size
-                except OSError:
-                    continue
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        child = Path(entry.path)
+                        if is_reparse_point(child):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(child)
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
         except OSError:
             continue
     return total

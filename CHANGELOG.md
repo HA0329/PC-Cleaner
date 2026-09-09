@@ -1,5 +1,187 @@
 # Changelog
 
+## 0.9.4 (2026-09)
+
+> 主题：**MCP 服务端 + 机器可读 JSON 契约 + 国际化 + CI**。
+> 让 AI Agent 能安全地（默认只读、两阶段确认、漂移检测）使用本工具，并给自动化调用
+> 提供固定契约与 JSON Schema。
+
+### MCP 服务端
+- **新增 [`pc_cleaner/mcp.py`](pc_cleaner/mcp.py)**：零依赖 **stdio JSON-RPC 2.0** 服务端
+  （`python -m pc_cleaner --mcp`），stdout 只承载协议、日志全部走 stderr；协议版本支持
+  `2024-11-05` / `2025-03-26` / `2025-06-18`，**回显客户端请求的版本**。
+- **默认只读**：未加 `--mcp-allow-delete` 时 `tools/list` 只有 `scan` / `health` / `history` /
+  `preview_delete`，`delete` / `undo` 既不出现在工具表、直接调用也会被拒绝。
+- **两阶段确认**：`preview_delete` 只返回清单 + `confirm_token`（**600 秒**有效、一次性、
+  绑定清单指纹），执行必须再调 `delete(confirm_token)`——Agent 无法「一步删掉」。
+- **漂移检测（防 TOCTOU）**：`delete` 重新扫描后比对——清单里**消失**的目标容忍（不再删）；
+  出现**未预览过的新目标**且体积 > `max(1MB, 5% × 清单总量)` → `status="needs_repreview"`
+  拒绝执行；已有目标体积变化容忍；**永远只删预览过的路径**。
+- **危险操作二次授权**：清单含高风险分类 / 永久删除 / 清空回收站时，`delete` 必须带
+  `acknowledge_danger=true`（token 只证明「这是你预览过的那批」，不代替授权）。
+- 每个工具同时返回 `content[0].text`（JSON 字符串）与 `structuredContent`（对象）；
+  `undo` 仅对 `recycle` 会话生效，可按 `session_id` 定位。
+- 新增 [`docs/mcp.md`](docs/mcp.md)：安全模型、工具参数表、一次典型交互、Claude Desktop /
+  通用 stdio MCP 客户端配置示例。
+
+### JSON 契约
+- **新增 `--json-schema`**：输出 `service.ENVELOPE_SCHEMA`（draft-07 子集，零依赖校验），
+  字段表与调用示例见新增的 [`docs/json-contract.md`](docs/json-contract.md)。
+- **⚠️ 语义变更**：`action.skipped` 现在是**整数计数**（部分清理的目标数）；
+  「什么都没执行」改用 **`action.not_executed: true`**（0.9.3 文档写的 `action.skipped=true`
+  已作废）。
+- `status` 新增三个取值：`preview`（MCP 预览）、`needs_repreview`（MCP 清单漂移）、
+  `restored`（MCP 回收站恢复完成）；并把 `--health --json` 实际返回的 `ok` 正式纳入枚举，
+  文档枚举同步为 12 个。
+- 契约承诺：字段**只增不减**，破坏性变更必须提升 `schema_version`（当前 `1`）。
+
+### 国际化
+- **新增 [`pc_cleaner/i18n.py`](pc_cleaner/i18n.py) + `pc_cleaner/locales/{zh_CN,en}.json`**
+  （各 167 个 key，扁平 `key → 译文`）：零依赖、只读语言文件、**永不抛出**（文件缺失/损坏/
+  占位符不匹配一律回退）。
+- 用法：`--lang zh_CN|en`、环境变量 `PC_CLEANER_LANG`、配置项 `language`；
+  优先级 **`--lang` > 配置 > 环境变量 > `zh_CN`**；语言别名归一化
+  （`zh` / `zh_cn` / `zh-hans` / `zh_CN.UTF-8` → `zh_CN`；`en` / `en_us` / `en-gb` → `en`）。
+- **当前覆盖范围**：`--health` 体检报告已完整双语（16 项的 label/detail/advice、标题、
+  汇总行、页脚）。实测 `--lang en --health` 除杀毒软件产品名（`火绒安全软件`，来自系统
+  返回值）外无中文残留。
+- **诚实标注限制**：交互式菜单、清理摘要与部分 CLI 提示**仍为中文**（尚未覆盖）；
+  locale key 缺失时回退 `zh_CN`，再缺失回退 key 本身。
+- 配置文件新增 `language`（默认 `""` = 按环境变量或默认 `zh_CN`）。
+
+### CI 与测试
+- **新增 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)**：矩阵
+  `windows-latest` + `ubuntu-latest` × Python `3.10` / `3.12` / `3.13`，`fail-fast: false`；
+  步骤 `pip install -e ".[dev]"` → `compileall` → `pytest -q` → `--version` →
+  `--validate-rules` → `--health --json`（重定向到文件后断言是合法 JSON、信封字段齐全、
+  `health.items` 非空）；仅使用 `actions/checkout@v4` 与 `actions/setup-python@v5`
+  两个官方 action，并带 `concurrency`（同分支旧运行取消）与 `permissions: contents: read`；
+  统一 `bash` + `PYTHONUTF8/PYTHONIOENCODING=utf-8`，避免 Windows 运行器写出 UTF-16/BOM。
+- **新增 `tests/test_v094_contract.py`（34）**：真实子进程验证 JSON 契约——stdout 必须是
+  **单个合法 JSON 对象**（无 ANSI、无旁白文本；`health.items[*].advice` 视为数据）、
+  信封必填字段与 `ok == (exit_code == 0)`、`status` 落在文档枚举内、退出码映射（0/1/4）、
+  危险闸门与 `--dry-run` 均不落地删除、`--health` 恰好 16 项且结构完整、stdin 关闭时仍能
+  正常返回、`recycle_bin_size_bytes` 随平台出现、空分类名不崩溃。
+- **新增 `tests/test_v094_mcp.py`（21）**：协议层（initialize / tools/list / 未知方法）、
+  默认只读时 `delete`/`undo` 不在工具表且调用被拒、两阶段确认（token 缺失/过期/一次性）、
+  漂移检测（新增目标超阈值 → `needs_repreview`；消失目标容忍）、危险清单需
+  `acknowledge_danger`、`undo` 走回收站恢复、**stdout 只含 JSON-RPC 帧**。
+- 全套测试 **114 passed**（`test_v092.py` 39 + `test_v093.py` 20 +
+  `test_v094_contract.py` 34 + `test_v094_mcp.py` 21）。Linux 上部分 Windows 专属用例
+  由 `skipif` 跳过，属预期行为。
+
+### 其它
+- 版本统一到 **0.9.4**（`__init__.py` / `pyproject.toml`）。
+- `history.json` 的会话新增 **`session_id`**（供 MCP `undo` 与将来的 `--undo --session`
+  精确定位；**旧会话无此字段**，读取时容错）。
+- `rules.json` 与 `--checkup` 的增量（新增 `%WINDIR%\SystemTemp` 规则 → 272 个目标；
+  WinSxS / DriverStore 体积改为标注硬链接口径并按 inode 去重）随本版合入，
+  已在 0.9.3 小节末尾同步记录。
+- 未做的事（明确说明，避免误解）：**没有** Trash Vault（回收站保险库）、
+  **没有** `--undo --session`（仅预留 `session_id`）、**没有** PyInstaller 打包。
+
+## 0.9.3 (2026-09)
+
+> 主题：**安全加固 + 面向自动化（AI Agent / 管道调用）的接口契约**。
+> 修掉一批「会删到正在运行的程序 / 顺着链接越界清空 / 自动化绕过二次确认」类缺陷，
+> 新增只读体检 `--health`（16 项）与固定退出码 / JSON 信封。
+
+### 安全修复
+- **`--json --yes` 绕过二次确认（严重）**：JSON 分支此前不看风险等级，`--json --clean
+  downloads --yes` 可直接删高风险分类。现在高风险分类 / 永久删除 / 清空回收站三类危险操作
+  必须显式加 `--risky`，否则返回 `status="needs_confirmation"` + **退出码 4**，**什么都不删**。
+- **非交互环境不再"静默取消"**：管道 / Agent 场景下 `--yes` 遇到危险操作会被**明确拒绝**
+  （`needs_confirmation`），而不是靠 stdin EOF 取消却返回退出码 0。
+- **CLEAR 目标本身是符号链接 / junction 时拒绝**：此前会顺着链接清空**链接目标**的目录内容
+  （例如 `C:\Users\All Users` → `C:\ProgramData`）；同时 `_dir_size` 不再跟随根链接，
+  体积统计不再虚高。删除（DELETE）目标拒绝链接自身的行为保持。
+- **路径词法规范化**：`expand_path` 统一 `absolute() + normpath()` 折叠 `..`、去掉 `\\?\`
+  扩展前缀；`normalize()` 额外去掉结尾空格与点。修复「同一目录因写法不同被当成两个路径」
+  导致的重复计数，以及 `\\?\` / 尾随点写法让绝对前缀式保护失效的问题。
+- **分类名拼错不再静默忽略**：`--clean` / `--exclude` 里的未知分类名现在报错并返回
+  **退出码 1**（此前 `--exclude download` 会被忽略、照常清理 `downloads`）。
+- **规则校验强制必填字段**：`glob_dirs` / `glob_files` 必须显式给出 `pattern`（此前缺省
+  `*` 等于清空整个 `base`）；`action` 大小写不敏感、非法值报错；`find_dirs` 必须给出正整数
+  `max_depth`。`--validate-rules` 另输出**警告**（死规则 / 冗余规则 / 风险错配），
+  警告不影响退出码。
+- **回收站释放量不再虚报**：进回收站的字节数只计入 `recycled`（清空回收站后才真正释放），
+  `freed` 只统计永久删除与清空回收站的实际减少量；**清空回收站失败会如实报错并计入
+  `failed`**（此前被忽略）。
+- **`history.json` 不再因写入中断而整体丢失**：原子写（`*.tmp-<pid>` + `os.replace`）、
+  解析失败改名 `*.corrupt-<时间戳>` 保留证据、读-改-写期间用 `history.lock` 做跨进程互斥；
+  **Ctrl+C 中断也会落盘**（已进回收站的文件仍可 `--undo-last` 找回），退出码 130。
+- **删除正在运行的程序的根因修复（规则侧）**：删除 `%LOCALAPPDATA%/npm-cache` 父规则
+  （它会被去重逻辑保留并 rmtree 掉整个 `npm-cache`，而其中 ~100% 是 `_npx`，实测包含
+  正在运行的 npx / AI 工具），改为只清 `_npx` / `_cacache` / `_logs` 并加 `skip_if_in_use`。
+
+### 新增能力
+- **`--health` 只读体检（16 项）**：新增 [`pc_cleaner/health.py`](pc_cleaner/health.py)，
+  零第三方依赖、纯只读（只读注册表 / 只跑只读查询命令，**绝不修改系统**）。覆盖系统版本、
+  Windows 更新暂停、待重启、Secure Boot、TPM、磁盘空间、设备问题、异常关机、SMB1、
+  不安全来宾登录、防火墙、杀毒软件、幽灵设备、磁盘健康、长路径、休眠文件；每项独立容错，
+  失败只变 `unknown`。存在 `error` 项时退出码 1；`--health --json` 输出
+  `{schema_version, ok, status, exit_code, health:{...}}`。
+- **进程占用检测 `skip_if_in_use`**：新增 [`pc_cleaner/proc.py`](pc_cleaner/proc.py)，
+  psutil 可选（存在时批量取 exe/cmdline 与打开句柄），缺失时回退一次
+  `powershell.exe Get-CimInstance Win32_Process`；进程快照与句柄结果均缓存 **60 秒**。
+  规则声明 `"skip_if_in_use": true` 后，目标被运行中进程占用时引擎整体跳过并计入
+  `skipped_in_use`（审计日志记为 `mode=skipped_in_use`）。
+- **`compact_db` 体积口径修正**：改为「空闲页 × 页大小」估算可回收量，不再把**整库大小**
+  当作可释放；无碎片可回收时不显示该目标。
+
+### 接口契约（面向自动化）
+- **退出码固定**：`0` 成功 / `1` 参数·配置·分类错误 / `2` argparse 用法 / `3` 删除失败 /
+  `4` 需要确认或已取消（什么都没删）/ `130` 用户中断。
+- **JSON 信封**：`--json` 顶层新增 `schema_version`(=1)、`ok`、`status`
+  （`scan`/`dry_run`/`deleted`/`partial`/`needs_confirmation`/`cancelled`/`interrupted`/
+  `error`）、`exit_code`；`action` 新增 `recycled_bytes`、`skipped_in_use`。
+- **`send2trash` 改为必需依赖**：`pip install -e .` 即带回收站支持，不再静默降级为永久
+  删除（与「安全第一 / 可撤销」的定位一致）；`.[recycle]` 保留为**空 extra** 兼容旧写法。
+- **`pc_cleaner.bat`**：`--no-pause` 改为启动器本地消费（此前被转发给 Python，导致
+  `unrecognized arguments` + 退出码 2）；优先 `py -3` 避开 Microsoft Store 的 python 存根；
+  设置 `PYTHONUTF8=1` 避免 cp936 控制台 UnicodeEncodeError。
+
+### 规则调整（`rules.json` 283 → 272 个目标）
+- **删除 12 条**：`%LOCALAPPDATA%/npm-cache` 父规则、微信 3.x **数据目录**
+  `%USERPROFILE%/Documents/WeChat Files`、`%PROGRAMDATA%/Package Cache`、
+  `%WINDIR%/WinSxS/Temp|Backup`、`$Recycle.Bin` 三条、`System32/config/systemprofile`
+  三条（受保护路径 / 不可逆 / 非受支持方式），以及被 `*` 覆盖的冗余
+  `System32/LogFiles pattern "*/*"`。
+- **`_npx` 改为独立目标**并加警示 label「正在运行的 npx/AI 工具会被破坏，占用时自动跳过」，
+  配 `skip_if_in_use`；共 **251/272** 条规则带该字段（`%TEMP%`、`%WINDIR%\Temp`、`Prefetch`、
+  `Downloads`、`dev_purge`、`compact_db`、`windows_old` 等故意不加，避免「全有全无」的跳过
+  让它们变成空操作）。
+- **新增白名单 `ALLOWED_CLEAR_UNDER_PROTECTED`**：`%WINDIR%\System32\LogFiles` 与
+  `%WINDIR%\System32\winevt\Logs` 位于受保护前缀之下，此前所有针对它们的规则**永久空转**
+  （实测 `System32\LogFiles` 有 31.9 MB 日志却从未被清理）。现在**只允许清空内容**，
+  根目录本身仍不可删除。
+- `chkdsk 残留(found.*)` 由 `delete` 改为 `clear`（只清空内容，不删目录本身）；
+  `%WINDIR%/Prefetch` label 标注「清理后首次启动/常用程序可能变慢」；
+  `winevt\Logs` 的 `*.evtx` 规则改为 `deep_only` + `older_than_days: 30`；
+  `USOPrivate/UpdateStore`、`Edge|Chrome Sync Data`、`OneDrive/FileCoAuth` 等状态数据规则
+  改为 `deep_only` 并在 label 写明后果；两条 `find_dirs` 显式给出 `max_depth`（16 / 12）。
+- 同步修正各分类 `note`：微信去掉不可复现的「本机约 636MB」、`hidden_installer_backups`
+  说明改用 DISM、`recycle_and_diagnostics` 说明回收站改走系统 API、`system_logs` 说明新白名单、
+  `database_compact` 说明体积口径。
+- **新增 1 条**：`%WINDIR%/SystemTemp`（Windows 11 24H2 新增的系统服务临时目录，
+  此前未被任何规则覆盖）。
+- **组件库体积口径**（`--checkup` / 运行环境适配）：`WinSxS` / `DriverStore` 的目录遍历值
+  含「与系统共享的硬链接」，会高于实际占用（本机 WinSxS 遍历 7.49 GB，DISM
+  `/AnalyzeComponentStore` 报告实际 4.55 GB），现已在输出中明确标注；
+  统计函数对同一遍历内出现的重复 inode 做去重（`st_nlink > 1` 时按 `(st_dev, st_ino)`）。
+
+### 文档与测试
+- README 同步：特性列表、分类表、安全模型（新增路径规范化 / junction / `skip_if_in_use` /
+  规则校验 / 危险操作闸门）、参数表（新增 `--health`）、**新增「退出码与 JSON 契约」小节**、
+  项目结构（新增 `health.py` / `proc.py` / `service.py` / `tests/test_v093.py`）、安装说明
+  （`send2trash` 必需）、测试数字（43 → **59**）。
+- 新增 `tests/test_v093.py`（20 个用例）：路径规范化与保护判定一致性、CLEAR 目标为 junction
+  时拒绝、`_dir_size` 不跟随根链接、`glob_dirs` 必填 `pattern`、`action` 大小写与非法值、
+  `skip_if_in_use` 从规则到 `Target` 的链路与引擎跳过、回收站只计 `recycled`、危险操作判定
+  与退出码映射、`--json` 拒绝未授权高风险分类、`--json` 未知分类退出码 1、`history.json`
+  原子写与损坏改名、`compact_db` 空闲页估算、白名单不短路名称级保护。
+- 全套测试 **59 passed**（`test_v092.py` 39 + `test_v093.py` 20）。
+
 ## 0.9.2 (2026-09)
 
 > 主题：**针对本机实测加强清理能力 + 修复一批真实缺陷**。

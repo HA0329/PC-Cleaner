@@ -46,6 +46,7 @@ from typing import Any, Callable, Iterator
 from .models import CategoryResult, Target, TargetAction, TargetKind, format_size  # noqa: F401
 from .rules import (
     DEFAULT_SKIP_DIRNAMES,
+    _expand_vars_cross_platform,   # v0.9.5：POSIX 上也展开 %VAR% 规则占位符
     category_label,
     get_protected_patterns,
     is_within_clear_root,
@@ -97,7 +98,11 @@ def expand_path(path_str: str) -> Path:
     ``ADMINI~1.DES``）——8.3 别名仅影响"同一条目录同时以长短名出现在规则中"时的
     去重效果，不影响保护判定的安全性（引擎侧仍会 ``resolve()`` 后再判一次）。
     """
-    expanded = os.path.expandvars(os.path.expanduser(str(path_str)))
+    expanded = _expand_vars_cross_platform(str(path_str))
+    # v0.9.5：POSIX 上把 Windows 风格反斜杠统一成 os.sep，否则 %WINDIR%\Temp
+    # 这类展开结果在 Linux/macOS 上会被当成单个目录名，保护/白名单全部失配
+    if os.sep == "/":
+        expanded = expanded.replace("\\", "/")
     try:
         s = os.path.normpath(str(Path(expanded).absolute()))
         if s.startswith("\\\\?\\"):
@@ -154,8 +159,14 @@ def is_reparse_point(path: Path) -> bool:
 # 安全增强：保护路径检查
 # ===========================================================================
 def _path_components(s: str) -> list[str]:
-    """把路径拆成小写组件列表（按 / 与 \\ 分割），用于组件级全等匹配。"""
-    parts = str(s).replace("/", os.sep).split(os.sep)
+    """把路径拆成小写组件列表（按 / 与 \\ 分割），用于组件级全等匹配。
+
+    v0.9.5：先把两种分隔符统一成 ``os.sep`` 再拆分——此前只在 Windows 上
+    生效（``os.sep == "\\"``），规则里的 ``\\.git`` / ``windows\\system32``
+    等模式在 Linux / macOS 上会变成**带反斜杠的单个组件**，永远匹配不到真实
+    目录名，导致「受保护目录不被保护、体积统计不剪枝」的跨平台安全缺陷。
+    """
+    parts = str(s).replace("\\", os.sep).replace("/", os.sep).split(os.sep)
     return [p.lower() for p in parts if p and p not in (".",)]
 
 
@@ -1234,6 +1245,7 @@ def scan_all(
     scan_depth: int = 20,
     on_progress: ScanProgressCB | None = None,
     workers: int = 0,
+    on_category_done: Callable[[CategoryResult], None] | None = None,
 ) -> list[CategoryResult]:
     """扫描所有分类（不含回收站），返回结果列表。
 
@@ -1248,6 +1260,9 @@ def scan_all(
     ``on_progress``：扫描进度回调 (category_label, current_idx, total)。
     ``workers``：并行扫描线程数（>1 时启用；目录遍历是 I/O 密集，线程池即可提速）。
     结果顺序始终与 ``specs`` 顺序一致，与 ``workers`` 取值无关。
+    ``on_category_done``：**每个分类扫完即回调**（v0.9.7 新增），并行模式下也
+    按完成顺序实时触发，用于累加"已找到目标/字节数"等实时统计——此前并行
+    模式要等全部扫完才一次性回放进度，进度条形同虚设。
     """
     is_protected = make_protect_check()
     size_memo: dict[str, tuple[int, int]] = {}
@@ -1255,7 +1270,7 @@ def scan_all(
     total = len(scan_specs)
 
     if workers and workers > 1 and total > 1:
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         slots: list[CategoryResult | None] = [None] * total
         with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
@@ -1265,35 +1280,49 @@ def scan_all(
                 ): i
                 for i, spec in enumerate(scan_specs)
             }
-            for fut, idx in futures.items():
+            # v0.9.7：按**完成顺序**回放进度（此前是提交顺序 + 全部扫完才回调，
+            # 并行扫描时进度条形同虚设）。结果仍按 slots 下标保证顺序稳定。
+            done = 0
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                done += 1
                 try:
-                    slots[idx] = fut.result()
+                    result = fut.result()
                 except Exception as exc:  # noqa: BLE001 单分类失败不影响其它分类
                     logger.exception("分类扫描线程异常: %s", exc)
                     spec = scan_specs[idx]
-                    slots[idx] = CategoryResult(
+                    result = CategoryResult(
                         key=str(spec.get("key") or "?"),
                         label=spec.get("label") or category_label(str(spec.get("key") or "?")),
                         risk=str(spec.get("risk") or "safe"),
                         scanned=True,
                     )
+                slots[idx] = result
+                if on_progress:
+                    on_progress(result.label, done, total)
+                if on_category_done:
+                    try:
+                        on_category_done(result)
+                    except Exception:  # noqa: BLE001 统计回调异常不影响扫描
+                        logger.debug("on_category_done 回调异常", exc_info=True)
         ordered = [r for r in slots if r is not None]
-        if on_progress:
-            for i, r in enumerate(ordered, start=1):
-                on_progress(r.label, i, total)
     else:
         ordered = []
         for idx, spec in enumerate(scan_specs, start=1):
-            ordered.append(
-                scan_spec(
-                    spec, is_protected,
-                    scan_depth=scan_depth,
-                    on_progress=on_progress,
-                    progress_idx=idx,
-                    progress_total=total,
-                    size_memo=size_memo,
-                )
+            result = scan_spec(
+                spec, is_protected,
+                scan_depth=scan_depth,
+                on_progress=on_progress,
+                progress_idx=idx,
+                progress_total=total,
+                size_memo=size_memo,
             )
+            ordered.append(result)
+            if on_category_done:
+                try:
+                    on_category_done(result)
+                except Exception:  # noqa: BLE001 统计回调异常不影响扫描
+                    logger.debug("on_category_done 回调异常", exc_info=True)
 
     # 跨分类去重 + 跨分类嵌套目标去重（父目录目标覆盖子目录目标）
     seen_paths: set[str] = set()
@@ -1366,6 +1395,10 @@ def _system_drives() -> list[str]:
     v0.9.3：改用 ``GetLogicalDrives`` + ``GetDriveTypeW``，避免逐个
     ``os.path.exists("X:\\")`` 探测 26 个盘符时被离线的映射网络盘 /
     空读卡器阻塞（回收站统计会调用它）。
+    v0.9.5：进一步**只保留本地固定盘**（``DRIVE_FIXED``）。可移动盘 / 光驱 /
+    网络盘上没有可清理的回收站，但对它们做 ``$Recycle.Bin`` 的 ``is_dir`` /
+    遍历 I/O 仍可能阻塞（离线网络盘 SMB 超时、空读卡器驱动超时），
+    同样会让菜单启动 / 回收站统计卡顿。
     """
     if sys.platform != "win32":
         return []
@@ -1387,9 +1420,10 @@ def _system_drives() -> list[str]:
 
             dtype = ctypes.windll.kernel32.GetDriveTypeW(drive)
         except Exception:  # noqa: BLE001
-            dtype = 3
-        # DRIVE_REMOVABLE=2 / FIXED=3 / REMOTE=4 / CDROM=5
-        if dtype in (2, 3, 4, 5):
+            continue
+        # DRIVE_FIXED = 3（本地固定盘）。离线映射网络盘返回 DRIVE_REMOTE(4)，
+        # 读卡器/光驱返回 DRIVE_REMOVABLE(2) / DRIVE_CDROM(5)，全部跳过。
+        if dtype == 3:
             out.append(drive)
     return out
 

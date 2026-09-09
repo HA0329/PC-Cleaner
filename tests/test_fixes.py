@@ -53,6 +53,7 @@ def test_allowlist_accepts_absolute_paths(tmp_path, monkeypatch):
     assert is_within_clear_root(tmp_path / "other") is False
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="%WINDIR% 只在 Windows 上有真实值")
 def test_allowlist_real_windir():
     """真实系统上 %WINDIR% 下的白名单目录应命中（字符串匹配，无需存在）。"""
     win = os.environ.get("WINDIR") or r"C:\Windows"

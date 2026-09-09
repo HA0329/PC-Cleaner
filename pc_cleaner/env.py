@@ -49,21 +49,46 @@ def _is_dir(*parts: str) -> bool:
     return p.is_dir()
 
 
-def _drive_roots() -> list[str]:
-    """返回本机存在的盘符根路径列表（只探测存在的盘）。"""
+def _fixed_drive_roots() -> list[str]:
+    """返回本机**本地固定盘**的盘符根路径列表（如 ``["C:\\", "D:\\"]``）。
+
+    v0.9.5 修复「启动卡顿几十秒」：旧实现逐个 ``os.path.exists("X:\\")`` 探测
+    26 个盘符，一旦存在**离线映射网络盘 / 空读卡器 / 无盘光驱**，每个盘符的
+    探测都会被 SMB / 驱动 I/O 超时阻塞（单盘可达 10~30 秒），导致交互菜单在
+    「本机适配」一行卡住很久（扫描却早已 0 秒完成——用户反馈的现象）。
+    改用 ``GetLogicalDrives`` + ``GetDriveTypeW``（纯读系统驱动器映射，
+    **不发起任何盘符 I/O**，离线网络盘也不会阻塞），并且只保留 ``DRIVE_FIXED``
+    （本地固定盘）——探测/统计只关心本地盘的缓存与回收站，可移动盘、光驱、
+    网络盘既无意义又可能阻塞。
+    """
     if sys.platform != "win32":
         return []
-    out: list[str] = []
-    import string
+    try:
+        import ctypes
+        import string
 
-    for letter in string.ascii_uppercase:
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+    except Exception:  # noqa: BLE001 只读探测失败就当作没有盘
+        return []
+    out: list[str] = []
+    for i, letter in enumerate(string.ascii_uppercase):
+        if not (mask >> i) & 1:
+            continue
         drive = f"{letter}:\\"
         try:
-            if os.path.exists(drive):
-                out.append(drive)
-        except OSError:
+            dtype = ctypes.windll.kernel32.GetDriveTypeW(drive)
+        except Exception:  # noqa: BLE001
             continue
+        # DRIVE_FIXED = 3（本地固定盘）。离线映射网络盘返回 DRIVE_REMOTE(4)，
+        # 读卡器/光驱返回 DRIVE_REMOVABLE(2) / DRIVE_CDROM(5)，全部跳过。
+        if dtype == 3:
+            out.append(drive)
     return out
+
+
+def _drive_roots() -> list[str]:
+    """返回本机存在的盘符根路径列表（只探测本地固定盘，非阻塞）。"""
+    return _fixed_drive_roots()
 
 
 def _dir_size_bytes(path: str) -> int | None:
@@ -341,12 +366,13 @@ def probe_environment(measure_wechat_size: bool = False) -> dict[str, Any]:
 
     全部只读；任何单项失败都不影响其它项。
     ``measure_wechat_size``：是否统计微信数据目录体积（较大时可能耗时）。
-    """
-    import string as _string
 
+    v0.9.5：磁盘用量只统计**本地固定盘**（``_drive_roots``，非阻塞枚举）。
+    旧实现盲目对 A~Z 全部盘符调用 ``shutil.disk_usage``，离线映射网络盘 /
+    空光驱会阻塞（SMB/驱动超时），交互菜单启动因此卡顿几十秒。
+    """
     drives: list[dict[str, Any]] = []
-    for letter in _string.ascii_uppercase:
-        drive = f"{letter}:\\"
+    for drive in _drive_roots():
         try:
             usage = shutil.disk_usage(drive)
         except OSError:

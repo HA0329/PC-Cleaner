@@ -47,9 +47,15 @@ def test_config_new_defaults():
 
 
 def test_parse_selection_fullwidth():
-    assert _parse_selection("1，3", 5) == {1, 3}
-    assert _parse_selection("all", 5) == "all"
-    assert _parse_selection("0", 5) == "none"
+    # v0.9.5：_parse_selection 早已改为返回结构化 dict（all/none/recycle/indexes），
+    # 此前的断言仍按旧 API（裸 set / 字符串）编写，属于过期测试。
+    sel = _parse_selection("1，3", 5)
+    assert sel["indexes"] == {1, 3}
+    assert sel["all"] is False
+    sel = _parse_selection("all", 5)
+    assert sel["all"] is True
+    sel = _parse_selection("0", 5)
+    assert sel["none"] is True
 
 
 # ---------------------------------------------------------------------------

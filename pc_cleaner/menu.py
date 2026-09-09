@@ -37,7 +37,14 @@ from .history import append_session, make_session, record_deletion_audit
 from .models import CategoryResult, TargetKind, format_size
 from .rules import get_enabled_category_specs
 from .scanner import is_admin, recycle_bin_size, scan_all
-from .ui import ScanProgressDisplay, _echo, _risk_badge, is_elevated, prompt_yes_no
+from .ui import (
+    CleanProgressDisplay,
+    ScanProgressDisplay,
+    _echo,
+    _risk_badge,
+    is_elevated,
+    prompt_yes_no,
+)
 
 # 注意：不再从 .cli 导入任何内容，避免循环依赖
 
@@ -339,7 +346,11 @@ def _print_env_adaptation(env: dict[str, Any] | None = None) -> None:
     try:
         if env is None:
             from .env import probe_environment
-            env = probe_environment(measure_wechat_size=False)
+            from .ui import Spinner
+
+            # v0.9.7：菜单首屏的环境探测在慢盘上要几秒，给个加载指示器
+            with Spinner("正在检测本机运行环境"):
+                env = probe_environment(measure_wechat_size=False)
         if not isinstance(env, dict):
             return
     except Exception:  # noqa: BLE001 探测失败不影响菜单可用
@@ -657,10 +668,15 @@ def _run_clean_flow(
 
     # 执行删除
     enable_history = bool(cfg.get("enable_history", True))
+    # v0.9.7：清理过程的实时状态（进度条 + 当前目标 + 已处理/跳过 + 已释放字节）。
+    # 非 TTY 时自动静默，因此管道 / Agent 调用不受影响。
+    cleaner = CleanProgressDisplay(enabled=not dry_run, mode=mode.value)
     audit_log = None
-    if enable_history:
+    if enable_history or cleaner.enabled:
         def audit_log(path, size, mode_name, freed=0) -> None:
-            record_deletion_audit(path, size, mode_name, freed)
+            if enable_history:
+                record_deletion_audit(path, size, mode_name, freed)
+            cleaner.record(path, size, mode_name, freed)
 
     result: dict[str, Any] = {
         "deleted": 0,
@@ -678,7 +694,7 @@ def _run_clean_flow(
             res = delete_targets(
                 targets,
                 mode,
-                on_progress=_progress_line,
+                on_progress=cleaner,
                 recycle_fallback=recycle_fallback,
                 shred=shred,
                 shred_passes=shred_passes,
@@ -690,6 +706,8 @@ def _run_clean_flow(
             result["skipped_in_use"] += res.get("skipped_in_use", 0)
             result["freed"] += res["freed"]
             result["recycled"] += res.get("recycled", 0)
+        # 清掉实时状态行（汇总由下面的"完成：…"统一输出）
+        cleaner.finish(None)
 
         if empty_bin:
             before_bin = recycle_bin_size() if sys.platform == "win32" else 0

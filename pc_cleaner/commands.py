@@ -103,9 +103,14 @@ def _cmd_print_env_adaptation() -> None:
         wechat_cleanable_summary,
         wechat_data_summary,
     )
+    from .ui import Spinner
 
+    # v0.9.7：环境探测包含组件库体积统计，在慢盘上可达数秒——用加载指示器
+    # 告诉用户"在干活"。Spinner 自带 TTY 判定，非交互 / 管道场景完全静默。
     try:
-        env = probe_environment(measure_wechat_size=True)
+        with Spinner("正在探测运行环境（浏览器 / GPU / 微信 / 组件库）") as spinner:
+            env = probe_environment(measure_wechat_size=True)
+            spinner.update("正在统计组件库与微信缓存体积")
     except Exception as exc:  # noqa: BLE001
         _echo(dim(f"  （运行环境探测失败，跳过本小节: {exc}）"))
         return

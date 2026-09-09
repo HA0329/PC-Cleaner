@@ -86,7 +86,13 @@ from .menu import (          # 从 menu 导入所有需要的交互函数，包�
 from .models import CategoryResult, format_size
 from .rules import get_enabled_category_specs
 from .scanner import is_admin, print_detail_report, recycle_bin_size, scan_all
-from .ui import ScanProgressDisplay, _echo, is_elevated
+from .ui import (
+    ScanProgressDisplay,
+    _echo,
+    _echo_err,
+    is_elevated,
+    print_startup_banner,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -296,14 +302,40 @@ def main(argv: list[str] | None = None) -> int:
     show_detail = args.detail or cfg.get("default_detail", False)
     show_tree = args.tree or cfg.get("compact_tree_view", False)
 
+    # v0.9.6：交互启动先给一行反馈，避免「双击后长时间只有光标闪烁」。
+    # 扫描进度条第一帧出现后会自动接续到下一行（进度行自带 \r 与行尾清除）。
+    # 只在 stderr 是 TTY 时打印，--json / 重定向场景不产生多余输出。
+    # v0.9.7：启动横幅 + 加载提示（版本 / 模式 / 深度 / 线程），让用户第一眼就知道
+    # 当前配置与"程序在干活"。与进度一样只在 stderr 是 TTY 时输出；
+    # --json / 管道 / MCP 场景完全静默（不污染 stdout）。
+    banner_enabled = (
+        show_progress
+        and not show_detail
+        and not show_tree
+        and sys.stderr.isatty()
+        and not args.export_scan
+    )
+    if banner_enabled:
+        print_startup_banner(
+            version=__version__,
+            mode=mode.value,
+            workers=workers,
+            depth=scan_depth,
+            deep=bool(args.deep),
+        )
+        _echo_err(dim("  正在加载规则并扫描缓存目录 ..."), end="", flush=True)
+
     # 只导出扫描结果：先于「管道自动 JSON」处理，避免重定向时只输出 JSON 而没写文件
     if args.export_scan:
-        progress = ScanProgressDisplay(enabled=show_progress)
+        progress = ScanProgressDisplay(
+            enabled=show_progress, total_categories=len(specs)
+        )
         results = scan_all(
             specs,
             scan_depth=scan_depth,
             on_progress=progress if show_progress else None,
             workers=workers,
+            on_category_done=progress.category_done if show_progress else None,
         )
         progress.finish(results)
         return _cmd_export_scan(results, args.export_scan)
@@ -332,12 +364,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # 全量扫描
-    progress = ScanProgressDisplay(enabled=show_progress and not show_detail and not show_tree)
+    progress = ScanProgressDisplay(
+        enabled=show_progress and not show_detail and not show_tree,
+        total_categories=len(specs),
+    )
     all_results = scan_all(
         specs,
         scan_depth=scan_depth,
         on_progress=progress if show_progress else None,
         workers=workers,
+        on_category_done=progress.category_done if show_progress else None,
     )
     progress.finish(all_results)
 

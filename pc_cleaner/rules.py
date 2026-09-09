@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -148,10 +149,37 @@ def _clear_root_sets() -> tuple[set[str], set[str]]:
     return ALLOWED_CLEAR_ROOTS, ALLOWED_CLEAR_UNDER_PROTECTED
 
 
+def _expand_vars_cross_platform(s: str) -> str:
+    """展开环境变量（``%VAR%`` / ``$VAR`` / ``~``），Windows 与 POSIX 一致。
+
+    POSIX 上的 ``os.path.expandvars`` 不识别 Windows 风格的 ``%VAR%``，
+    而内置规则大量使用 ``%WINDIR%`` / ``%APPDATA%`` 等占位符；不展开会导致
+    Linux / macOS 上白名单、保护路径全部失配（v0.9.5 修复）。
+    """
+    out = os.path.expandvars(os.path.expanduser(s))
+    if os.name == "nt":
+        return out
+    if "%" in out:
+        out = re.sub(
+            r"%([^%]+)%",
+            lambda m: os.environ.get(m.group(1), m.group(0)),
+            out,
+        )
+    return out
+
+
 def _resolve_root(root: str) -> str | None:
-    """把白名单根路径解析为规范化绝对路径（展开环境变量 / ~）。"""
+    """把白名单根路径解析为规范化绝对路径（展开环境变量 / ~）。
+
+    v0.9.5：POSIX 上把反斜杠统一成 ``os.sep`` 再归一化——否则 ``%WINDIR%``
+    展开后得到的 ``C:\\Windows`` 在 Linux 上会被当成单个目录名，
+    与真实路径（``/…/Windows/Temp``）永远匹配不上。
+    """
     try:
-        expanded = os.path.abspath(os.path.expandvars(os.path.expanduser(root)))
+        expanded = _expand_vars_cross_platform(root)
+        if os.sep == "/":
+            expanded = expanded.replace("\\", "/")
+        expanded = os.path.abspath(expanded)
     except (OSError, ValueError):
         return None
     return os.path.normcase(expanded)

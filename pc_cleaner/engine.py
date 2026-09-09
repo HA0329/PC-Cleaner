@@ -167,6 +167,30 @@ def _shred_file(path: Path, passes: int = 1) -> None:
 # ===========================================================================
 # 删除单个文件/目录（TOCTOU 防护）
 # ===========================================================================
+def _rmtree(path: Path) -> None:
+    """删除整棵目录，Windows 只读属性导致失败时先清属性再重试（v0.9.3）。
+
+    ``shutil.rmtree(ignore_errors=False)`` 在遇到只读文件时直接抛
+    ``PermissionError``；临时目录/缓存里只读文件很常见，先 ``chmod`` 再删。
+    Python 3.12 起 ``onerror`` 被 ``onexc`` 取代，这里按版本选择。
+    """
+
+    def _retry(func, target, exc):  # noqa: ANN001
+        try:
+            os.chmod(target, 0o700)
+        except OSError:
+            raise exc
+        try:
+            func(target)
+        except OSError:
+            raise
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(str(path), ignore_errors=False, onexc=_retry)
+    else:  # pragma: no cover - Python 3.10/3.11
+        shutil.rmtree(str(path), ignore_errors=False, onerror=_retry)
+
+
 def _delete_path(
     path: Path,
     mode: CleanMode,
@@ -221,7 +245,7 @@ def _delete_path(
                         _shred_file(child, passes=shred_passes)
                 except OSError:
                     continue
-        shutil.rmtree(str(real), ignore_errors=False)
+        _rmtree(real)
     else:
         if shred:
             # 先覆写内容，再删除文件（覆写失败仍尝试删除，避免留下文件）
@@ -250,6 +274,13 @@ def _clear_dir_content(
     避免越界删除链接目标。
     """
     from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
+
+    if is_reparse_point(path):
+        # v0.9.3 安全增强：CLEAR 根自身是符号链接 / junction 时拒绝。
+        # 此前只对子项判重解析点，path.iterdir() 会跟随链接，
+        # 于是「清空 C:\Users\All Users」会真的清空 C:\ProgramData。
+        logger.warning("拒绝清空符号链接/junction 目录（不跟随链接）: %s", path)
+        return (0, 0)
 
     deleted = 0
     failed = 0
@@ -297,6 +328,25 @@ def _clear_dir_content(
 # ===========================================================================
 # 批量删除入口
 # ===========================================================================
+def _in_use_reason(path: Path) -> str:
+    """目标是否被运行中进程占用；是则返回原因描述，否则空串（v0.9.3）。
+
+    依赖 :mod:`pc_cleaner.proc`（零必需依赖，psutil 可选，PowerShell 回退）；
+    该模块不可用或检测失败时返回空串（不阻断删除，保持原有行为）。
+    """
+    try:
+        from .proc import any_process_uses
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        users = any_process_uses(path)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not users:
+        return ""
+    return "、".join(str(u) for u in list(users)[:3])
+
+
 def delete_targets(
     targets: list[Target],
     mode: CleanMode,
@@ -308,13 +358,17 @@ def delete_targets(
 ) -> dict[str, int]:
     """执行删除。
 
-    返回 ``{"deleted": n, "failed": n, "freed": bytes, "skipped": n}``。
+    返回 ``{"deleted": n, "failed": n, "freed": bytes, "recycled": bytes,
+    "skipped": n, "skipped_in_use": n}``。
 
     - ``deleted``：成功处理的目标数（COMPACT 目标也算一次成功处理）；
     - ``failed``：抛错/完全没能清理的目标数；
-    - ``freed``：**实际释放**的字节数（CLEAR 用删除前后体积差，而不是扫描时
-      的估计值；目录里被占用/受保护的文件不会被算进去）；
-    - ``skipped``：部分成功（清空目录时有子项被占用）的目标数。
+    - ``freed``：**实际释放**的字节数（永久删除/清空/压缩）；
+    - ``recycled``：**进回收站**的字节数（v0.9.3 新增——进回收站不释放空间，
+      要清空回收站才释放，因此不再混进 ``freed`` 虚报）；
+    - ``skipped``：部分成功（清空目录时有子项被占用）的目标数；
+    - ``skipped_in_use``：因目标被运行中进程占用而跳过的目标数（规则声明了
+      ``skip_if_in_use``，如 npm ``_npx``）。
 
     ``recycle_fallback``：进回收站失败时是否回退为永久删除。
     ``None`` 时读取配置 ``recycle_error_fallback``（默认 False，即失败就保留）。
@@ -337,11 +391,26 @@ def delete_targets(
     deleted = 0
     failed = 0
     skipped = 0
+    skipped_in_use = 0
     freed = 0
+    recycled = 0
+    # v0.9.3：进回收站时空间并未真正释放（要清空回收站才释放），分开统计
+    recycle_mode = mode is CleanMode.RECYCLE and HAS_SEND2TRASH
     for i, t in enumerate(targets, start=1):
         try:
             # 首先调用 _guard_path 进行初步检查（使用原始路径，但内部会 resolve）
             _guard_path(t.path, is_protected, t.action)
+
+            # v0.9.3：规则声明 skip_if_in_use 时，目标被运行中进程占用就跳过。
+            # 典型场景：npm _npx 里正跑着 npx 安装的 CLI / AI 工具，
+            # 清掉会让它们"当场不报错、下次启动才崩"。
+            if t.skip_if_in_use:
+                reason = _in_use_reason(t.path)
+                if reason:
+                    skipped_in_use += 1
+                    audit(t.path, 0, "skipped_in_use", 0)
+                    on_progress(i, total, f"[跳过] {t.path}（正被进程占用: {reason}）")
+                    continue
 
             if t.action is TargetAction.COMPACT:
                 # 数据库压缩：VACUUM 重写文件，不删除数据
@@ -358,8 +427,12 @@ def delete_targets(
                     shred=shred,
                     shred_passes=shred_passes,
                 )
-                freed += t.size
-                audit(t.path, t.size, mode.value, t.size)
+                if recycle_mode:
+                    recycled += t.size
+                    audit(t.path, t.size, mode.value, 0)
+                else:
+                    freed += t.size
+                    audit(t.path, t.size, mode.value, t.size)
             elif t.action is TargetAction.CLEAR:
                 # 清空目录内容（保留目录本身）
                 before = _dir_size_now(t.path)
@@ -374,8 +447,12 @@ def delete_targets(
                 )
                 after = _dir_size_now(t.path)
                 freed_here = max(before - after, 0)
-                freed += freed_here
-                audit(t.path, t.size, mode.value, freed_here)
+                if recycle_mode:
+                    recycled += freed_here
+                    audit(t.path, t.size, mode.value, 0)
+                else:
+                    freed += freed_here
+                    audit(t.path, t.size, mode.value, freed_here)
                 if clear_failed and freed_here == 0:
                     # 一个都没删掉：计入失败，避免"假装成功"
                     failed += 1
@@ -393,8 +470,12 @@ def delete_targets(
                     shred=shred,
                     shred_passes=shred_passes,
                 )
-                freed += t.size
-                audit(t.path, t.size, mode.value, t.size)
+                if recycle_mode:
+                    recycled += t.size
+                    audit(t.path, t.size, mode.value, 0)
+                else:
+                    freed += t.size
+                    audit(t.path, t.size, mode.value, t.size)
             deleted += 1
             on_progress(i, total, t.describe())
         except (PermissionError, OSError, FileNotFoundError) as exc:
@@ -405,7 +486,14 @@ def delete_targets(
             logger.exception("删除目标 %s 时发生非预期异常: %s", t.path, exc)
             failed += 1
             on_progress(i, total, f"[错误] {t.path} (异常: {exc})")
-    return {"deleted": deleted, "failed": failed, "freed": freed, "skipped": skipped}
+    return {
+        "deleted": deleted,
+        "failed": failed,
+        "freed": freed,
+        "recycled": recycled,
+        "skipped": skipped,
+        "skipped_in_use": skipped_in_use,
+    }
 
 
 def _dir_size_now(path: Path) -> int:
@@ -439,6 +527,16 @@ def compact_database(path: Path) -> int:
         before = path.stat().st_size
     except OSError:
         raise PermissionError(f"无法访问数据库: {path}")
+    # v0.9.3：VACUUM 需要约 1 倍库大小的临时空间，空间不足时直接拒绝，
+    # 避免白耗时间/写满磁盘（SQLite 会回滚，但用户看到的是"压缩失败"）。
+    try:
+        free = shutil.disk_usage(str(path.parent)).free
+    except OSError:
+        free = None
+    if free is not None and free < before:
+        raise PermissionError(
+            f"磁盘可用空间不足（VACUUM 约需 {format_size(before)}）: {path}"
+        )
     try:
         con = sqlite3.connect(str(path), isolation_level=None)
         try:

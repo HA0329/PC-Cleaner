@@ -560,12 +560,16 @@ def _run_clean_flow(
     ext_filter: list[str] | None = None,
     min_size_bytes: int | None = None,
     older_than_secs: int | None = None,
+    allow_dangerous: bool = False,
 ) -> dict[str, Any]:
     """对选中的分类执行：预览 -> 确认 -> 删除。
 
     安全增强：
     - 即使 auto_confirm=True，如果操作包含高风险分类、回收站清空、或永久删除，
       也强制要求用户二次确认（输入 yes）。
+    - v0.9.3：``allow_dangerous`` 表示调用方已**显式授权**危险操作（CLI ``--risky``）；
+      未授权且非交互（管道 / Agent 调用）时**直接拒绝**并返回
+      ``{"needs_confirmation": True}``（退出码 4），不再依赖 stdin EOF 兜底。
     """
     # 预览与删除使用同一份过滤结果，避免“预览了但没删/删了没预览”的偏差
     per_category: list[tuple[Any, list[Any]]] = []
@@ -627,8 +631,27 @@ def _run_clean_flow(
                 empty_bin = False
     else:
         # --yes 模式下，仍对危险操作进行二次警示
-        if dangerous:
+        if dangerous and not allow_dangerous:
+            from .service import dangerous_reasons
+
+            reasons = dangerous_reasons(
+                selected, mode, ["recycle_bin"] if empty_bin else []
+            )
+            if not sys.stdin.isatty():
+                # 非交互（管道 / Agent 调用）：明确拒绝，而不是让 EOF 把危险操作
+                # 变成"静默取消但退出码 0"（v0.9.3）。
+                _echo(
+                    red(
+                        "⚠️  危险操作在非交互环境下被拒绝："
+                        + "；".join(reasons)
+                        + "。请先用 --json --dry-run 预览，"
+                        "确认后显式加 --risky 授权再执行。"
+                    )
+                )
+                return {"needs_confirmation": True, "reasons": reasons}
             _echo(red("⚠️  警告：当前操作包含不可恢复的删除！"))
+            if reasons:
+                _echo(red("    " + "；".join(reasons)))
             if not prompt_yes_no("  确认要继续吗？(输入 yes 继续)", default=False):
                 return {"cancelled": True}
 
@@ -639,50 +662,73 @@ def _run_clean_flow(
         def audit_log(path, size, mode_name, freed=0) -> None:
             record_deletion_audit(path, size, mode_name, freed)
 
-    result: dict[str, Any] = {"deleted": 0, "failed": 0, "skipped": 0, "freed": 0, "empty_bin": empty_bin}
-    if targets:
-        res = delete_targets(
-            targets,
-            mode,
-            on_progress=_progress_line,
-            recycle_fallback=recycle_fallback,
-            shred=shred,
-            shred_passes=shred_passes,
-            audit=audit_log,
-        )
-        result["deleted"] += res["deleted"]
-        result["failed"] += res["failed"]
-        result["skipped"] += res.get("skipped", 0)
-        result["freed"] += res["freed"]
+    result: dict[str, Any] = {
+        "deleted": 0,
+        "failed": 0,
+        "skipped": 0,
+        "skipped_in_use": 0,
+        "freed": 0,
+        "recycled": 0,
+        "empty_bin": empty_bin,
+    }
+    # v0.9.3：Ctrl+C（KeyboardInterrupt 是 BaseException，此前会直接穿出 main()）
+    # 也要把"已处理的目标"落盘，否则已进回收站的文件无法用 --undo-last 找回。
+    try:
+        if targets:
+            res = delete_targets(
+                targets,
+                mode,
+                on_progress=_progress_line,
+                recycle_fallback=recycle_fallback,
+                shred=shred,
+                shred_passes=shred_passes,
+                audit=audit_log,
+            )
+            result["deleted"] += res["deleted"]
+            result["failed"] += res["failed"]
+            result["skipped"] += res.get("skipped", 0)
+            result["skipped_in_use"] += res.get("skipped_in_use", 0)
+            result["freed"] += res["freed"]
+            result["recycled"] += res.get("recycled", 0)
 
-    if empty_bin:
-        before_bin = recycle_bin_size() if sys.platform == "win32" else 0
-        bin_res = empty_recycle_bin()
-        result["empty_bin_result"] = bin_res
-        after_bin = recycle_bin_size() if sys.platform == "win32" else 0
-        # 清空回收站释放的空间单独计入，让"释放约 X"更真实
-        result["freed"] += max(before_bin - after_bin, 0)
-        _echo("回收站清空完成。")
-
-    # 记录历史会话（--history / --undo-last 使用）
-    if enable_history and (targets or empty_bin):
-        session = make_session(
-            mode=mode.value,
-            deleted=result["deleted"],
-            failed=result["failed"],
-            freed=result["freed"],
-            categories=[r.key for r in selected] + (["recycle_bin"] if empty_bin else []),
-            targets=[
-                {
-                    "path": str(t.path),
-                    "size": t.size,
-                    "action": t.action.value,
-                }
-                for t in targets
-            ],
-            note="shred" if shred else "",
-        )
-        append_session(session)
+        if empty_bin:
+            before_bin = recycle_bin_size() if sys.platform == "win32" else 0
+            bin_res = empty_recycle_bin()
+            result["empty_bin_result"] = bin_res
+            after_bin = recycle_bin_size() if sys.platform == "win32" else 0
+            # 清空回收站释放的空间单独计入，让"释放约 X"更真实
+            result["freed"] += max(before_bin - after_bin, 0)
+            # v0.9.3：清空失败不再谎报"完成"（engine 返回 failed=1 时此前被忽略）
+            if bin_res.get("failed"):
+                result["failed"] += 1
+                _echo(red("回收站清空失败（可能有文件被占用或权限不足）。"))
+            else:
+                _echo("回收站清空完成。")
+    except KeyboardInterrupt:
+        result["interrupted"] = True
+        _echo("")
+        _echo(yellow("已中断（Ctrl+C）。已处理的部分会记入历史，可用 --undo-last 恢复。"))
+    finally:
+        # 记录历史会话（--history / --undo-last 使用）—— 即使中断也要落盘
+        if enable_history and (targets or empty_bin):
+            session = make_session(
+                mode=mode.value,
+                deleted=result["deleted"],
+                failed=result["failed"],
+                freed=result["freed"],
+                categories=[r.key for r in selected]
+                + (["recycle_bin"] if empty_bin else []),
+                targets=[
+                    {
+                        "path": str(t.path),
+                        "size": t.size,
+                        "action": t.action.value,
+                    }
+                    for t in targets
+                ],
+                note="shred" if shred else "",
+            )
+            append_session(session)
 
     _echo("")
     summary = (
@@ -693,6 +739,15 @@ def _run_clean_flow(
     if result.get("skipped"):
         partial = result["skipped"]
         summary += f" {dim(f'（另有 {partial} 个目录部分清理，剩余文件被占用）')}"
+    if result.get("recycled"):
+        recycled_txt = format_size(result["recycled"])
+        summary += (
+            f" {dim(f'（另有 {recycled_txt} 已移入回收站，'
+                     f'清空回收站后才真正释放）')}"
+        )
+    if result.get("skipped_in_use"):
+        in_use = result["skipped_in_use"]
+        summary += f" {dim(f'（{in_use} 项目标因被运行中程序占用而跳过）')}"
     _echo(summary)
     _print_disk_free(selected)
     return result

@@ -377,7 +377,7 @@ def _cmd_show_rules(deep: bool = False) -> int:
 
 
 def _cmd_validate_rules() -> int:
-    """校验 rules.json 规则格式。"""
+    """校验 rules.json 规则格式（v0.9.3：额外输出警告清单）。"""
     specs = _builtin_specs(deep=True)
     errors = validate_rules(specs)
     if errors:
@@ -395,6 +395,18 @@ def _cmd_validate_rules() -> int:
             f"其中 {deep_only} 个 deep_only。"
         )
     )
+    # v0.9.3：警告不影响退出码，但会如实打印（死规则 / 冗余规则 / 风险错配）
+    warnings: list[str] = []
+    try:
+        from .rules import validate_rules_detailed
+
+        _errors, warnings = validate_rules_detailed(specs)
+    except Exception:  # noqa: BLE001 旧版 rules.py 无此 API 时静默跳过
+        warnings = []
+    if warnings:
+        _echo(yellow(f"⚠ 规则警告：{len(warnings)} 条（不影响退出码）"))
+        for w in warnings:
+            _echo(f"  {yellow('!')} {w}")
     return 0
 
 

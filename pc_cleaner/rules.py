@@ -67,7 +67,11 @@ DEFAULT_PROTECTED_PATTERNS: list[str] = [
     r"windows\softwaredistribution",
     r"program files\windows nt",
     r"programdata\microsoft\windows defender",
-    r"appdata\local\microsoft\windows\explorer\thumbcache",
+    # 注意（v0.9.3）：曾有一条 appdata\local\microsoft\windows\explorer\thumbcache，
+    # 它按「路径组件全等」匹配，只能命中名为 thumbcache 的**目录**，
+    # 而真实的缩略图/图标缓存是 Explorer 目录下的 thumbcache_*.db / iconcache_*.db
+    # 文件，因此该模式永远匹配不到、属于无效保护（已删除）。
+    # 对应文件改为在 rules.json 里用 skip_if_in_use 处理（被 explorer 占用时跳过）。
     # 微信等用户数据，绝不自动删除
     r"weixin",
     r"weixinshuju",
@@ -122,6 +126,27 @@ ALLOWED_CLEAR_ROOTS: set[str] = {
     r"%WINDIR%\Temp",
 }
 
+# ---------------------------------------------------------------------------
+# 受保护前缀之下的「只允许清空内容」白名单（v0.9.3 新增）
+# ---------------------------------------------------------------------------
+# 这些目录本身位于受保护前缀（windows\system32）之下，此前导致
+# rules.json 里针对它们的所有规则**永远扫描不到任何目标**（静默空转）：
+# System32\LogFiles 实测有 31.9 MB 诊断日志却从未被清理。
+#
+# 语义与 ALLOWED_CLEAR_ROOTS 的差别：
+# - 二者都表示「内容可以清空」；
+# - 本集合内的目录**永远不允许被整体删除**（即使规则写 delete_dir），
+#   引擎只需放行 CLEAR（见 engine._guard_path / is_clear_root）。
+ALLOWED_CLEAR_UNDER_PROTECTED: set[str] = {
+    r"%WINDIR%\System32\LogFiles",
+    r"%WINDIR%\System32\winevt\Logs",
+}
+
+
+def _clear_root_sets() -> tuple[set[str], set[str]]:
+    """返回 (常规白名单, 受保护前缀下的白名单)。"""
+    return ALLOWED_CLEAR_ROOTS, ALLOWED_CLEAR_UNDER_PROTECTED
+
 
 def _resolve_root(root: str) -> str | None:
     """把白名单根路径解析为规范化绝对路径（展开环境变量 / ~）。"""
@@ -135,14 +160,35 @@ def _resolve_root(root: str) -> str | None:
 def is_within_clear_root(path) -> bool:
     """路径是否位于某个允许清空的白名单目录（含其自身）。
 
-    白名单根路径支持 Windows 环境变量（如 ``%WINDIR%``），每次调用时
-    动态展开，因此系统盘不是 ``C:`` 也能正确匹配；也兼容直接写入的
-    绝对路径条目（旧式配置 / 测试注入）。
+    同时识别两类白名单：``ALLOWED_CLEAR_ROOTS``（常规可清空缓存目录）与
+    ``ALLOWED_CLEAR_UNDER_PROTECTED``（受保护前缀之下、只允许清空内容的
+    诊断日志目录，如 System32\\LogFiles）。白名单根路径支持 Windows
+    环境变量（如 ``%WINDIR%``），每次调用时动态展开，因此系统盘不是 ``C:``
+    也能正确匹配；也兼容直接写入的绝对路径条目（旧式配置 / 测试注入）。
     """
     s = _resolve_root(str(path))
     if s is None:
         return False
-    for root in ALLOWED_CLEAR_ROOTS:
+    normal, under_protected = _clear_root_sets()
+    for root in normal | under_protected:
+        r = _resolve_root(root)
+        if r is None:
+            continue
+        if s == r or s.startswith(r + os.sep):
+            return True
+    return False
+
+
+def is_clear_under_protected(path) -> bool:
+    """路径是否位于「受保护前缀之下、只允许清空」的白名单内（含其自身）。
+
+    引擎用它区分：命中本函数 → 只允许 CLEAR（清空内容），
+    DELETE（删除目录本身或其子项）应被拒绝。
+    """
+    s = _resolve_root(str(path))
+    if s is None:
+        return False
+    for root in ALLOWED_CLEAR_UNDER_PROTECTED:
         r = _resolve_root(root)
         if r is None:
             continue
@@ -155,12 +201,14 @@ def is_clear_root(path) -> bool:
     """路径是否**恰好等于**某个允许清空的白名单根目录本身。
 
     用于引擎守卫区分「删除白名单根目录本身」（禁止）与「清空其内容 /
-    删除其下的子项」（允许）。
+    删除其下的子项」（允许）。两类白名单的根目录都算，因此
+    ``System32\\LogFiles`` 本身永远不会被整体删除。
     """
     s = _resolve_root(str(path))
     if s is None:
         return False
-    for root in ALLOWED_CLEAR_ROOTS:
+    normal, under_protected = _clear_root_sets()
+    for root in normal | under_protected:
         r = _resolve_root(root)
         if r is None:
             continue
@@ -475,16 +523,180 @@ VALID_TARGET_TYPES: set[str] = {
 # 合法的目录/文件动作
 VALID_ACTIONS: set[str] = {"clear", "delete"}
 
+# 用户数据目录标记（用于警告「safe 分类却清理用户数据」）
+USER_DATA_MARKERS: set[str] = {
+    "documents",
+    "desktop",
+    "onedrive",
+    "wechat files",
+    "downloads",
+}
+# 位于这些组件之下的路径视为「应用缓存」而非用户数据（避免误报）
+_APP_DATA_MARKERS = {"appdata", "programdata", "application data"}
 
-def validate_rules(specs: list[dict[str, Any]] | None = None) -> list[str]:
-    """校验规则列表，返回错误信息列表（空列表表示全部通过）。
 
-    覆盖：分类 key 重复/缺失、非法 risk、缺 label、非法 target 类型、
-    各类型必需的字段（path/base/bases/names）、非法 action。
+class ValidationReport(list):
+    """``validate_rules()`` 的返回值：list[str]（错误）+ ``.warnings``（提示）。
+
+    继承 ``list`` 是为了与既有调用方兼容（``if errors: ...`` / ``len(errors)``
+    / ``== []`` 行为不变），同时把「只提示、不拦截」的警告放在 ``.warnings``。
+    """
+
+    def __init__(self, errors=(), warnings=()) -> None:
+        super().__init__(errors)
+        self.warnings: list[str] = list(warnings)
+
+    @property
+    def ok(self) -> bool:
+        """没有错误时为 True（警告不影响）。"""
+        return not self
+
+
+def _expand_for_validation(raw: Any) -> str | None:
+    """把规则里的路径字符串展开为规范化绝对路径（仅用于校验，不解析链接）。"""
+    try:
+        s = os.path.abspath(os.path.expandvars(os.path.expanduser(str(raw))))
+    except (OSError, ValueError, TypeError):
+        return None
+    return os.path.normcase(s)
+
+
+def _has_clear_root_under(base_norm: str) -> bool:
+    """base 之下是否还存在「允许清空」的白名单根（部分覆盖也算有效规则）。"""
+    normal, under_protected = _clear_root_sets()
+    for root in normal | under_protected:
+        r = _resolve_root(root)
+        if r and r.startswith(base_norm + os.sep):
+            return True
+    return False
+
+
+def _target_locations(t: dict[str, Any]) -> list[str]:
+    """取出 target 里可以静态展开的路径（path / base / bases）。"""
+    out: list[str] = []
+    if isinstance(t.get("path"), str):
+        out.append(t["path"])
+    if isinstance(t.get("base"), str):
+        out.append(t["base"])
+    bases = t.get("bases")
+    if isinstance(bases, (list, tuple)):
+        out.extend(b for b in bases if isinstance(b, str))
+    return out
+
+
+def _warn_protected_targets(specs, warnings: list[str]) -> None:
+    """警告「规则展开后命中保护模式」——这类规则永远扫描不到目标（静默空转）。"""
+    try:
+        from .scanner import make_protect_check  # 延迟导入，避免循环依赖
+    except Exception:  # noqa: BLE001 校验不应因扫描器导入失败而中断
+        return
+    try:
+        is_protected = make_protect_check()
+    except Exception:  # noqa: BLE001
+        return
+
+    for cat in specs:
+        if not isinstance(cat, dict):
+            continue
+        key = cat.get("key") or "?"
+        for j, t in enumerate(cat.get("targets", []) or [], start=1):
+            if not isinstance(t, dict):
+                continue
+            ttype = t.get("type")
+            loc = f"[{key}] targets[{j}]"
+            for raw in _target_locations(t):
+                if raw == "<CWD>":
+                    continue
+                norm = _expand_for_validation(raw)
+                if not norm:
+                    continue
+                if not is_protected(norm):
+                    continue
+                # base 型规则：只要 base 之下还有白名单清空根，就不算完全空转
+                if ttype in ("glob_dirs", "glob_files", "files_by_rule", "compact_db",
+                             "empty_dirs", "zero_byte_files", "find_dirs"):
+                    if _has_clear_root_under(norm):
+                        continue
+                warnings.append(
+                    f"{loc} 目标落在受保护路径，规则将永远扫描不到任何内容（空转）: {raw}"
+                )
+                break
+
+
+def _warn_redundant_targets(specs, warnings: list[str]) -> None:
+    """警告「同分类内被父目录目标覆盖」的冗余规则（只统计可静态展开的目录目标）。"""
+    for cat in specs:
+        if not isinstance(cat, dict):
+            continue
+        key = cat.get("key") or "?"
+        dirs: list[tuple[str, str, int]] = []
+        for j, t in enumerate(cat.get("targets", []) or [], start=1):
+            if not isinstance(t, dict):
+                continue
+            if t.get("type") not in ("clear_dir", "delete_dir"):
+                continue
+            raw = t.get("path")
+            norm = _expand_for_validation(raw) if isinstance(raw, str) else None
+            if norm:
+                dirs.append((norm, str(raw), j))
+        for norm, raw, j in dirs:
+            for parent, praw, _pj in dirs:
+                if parent != norm and norm.startswith(parent + os.sep):
+                    warnings.append(
+                        f"[{key}] targets[{j}] {raw} 已被同分类父目录目标 {praw} 覆盖"
+                        "（体积会被去重，规则冗余）"
+                    )
+                    break
+
+
+def _warn_user_data_risk(specs, warnings: list[str]) -> None:
+    """警告「base/path 落在用户数据目录却标 safe」的风险错配。"""
+    for cat in specs:
+        if not isinstance(cat, dict):
+            continue
+        if str(cat.get("risk") or "safe") != "safe":
+            continue
+        key = cat.get("key") or "?"
+        for j, t in enumerate(cat.get("targets", []) or [], start=1):
+            if not isinstance(t, dict):
+                continue
+            for raw in _target_locations(t):
+                if raw == "<CWD>":
+                    continue
+                norm = _expand_for_validation(raw)
+                if not norm:
+                    continue
+                parts = [p for p in norm.replace("/", os.sep).split(os.sep) if p]
+                if any(p in _APP_DATA_MARKERS for p in parts):
+                    continue
+                if any(p in USER_DATA_MARKERS for p in parts):
+                    warnings.append(
+                        f"[{key}] targets[{j}] {raw} 指向用户数据目录，"
+                        "但分类 risk=safe（建议降级为 risky 或加阈值）"
+                    )
+                    break
+
+
+def validate_rules(specs: list[dict[str, Any]] | None = None) -> ValidationReport:
+    """校验规则列表，返回 :class:`ValidationReport`（空列表 = 无错误）。
+
+    **错误（errors，导致 --validate-rules 退出码非 0）**覆盖：
+    分类 key 重复/缺失、非法 risk、缺 label、非法 target 类型、
+    各类型必需的字段（path/base/bases/names）、非法 action；
+    v0.9.3 起新增三条强制校验：
+    - ``glob_dirs`` / ``glob_files`` 必须显式给出 ``pattern``
+      （缺失时扫描器默认 ``*``，等于清理/删除整个 base）；
+    - ``action`` 必须是 ``clear`` / ``delete``（大小写不敏感）；
+    - ``find_dirs`` 必须显式给出正整数 ``max_depth``。
+
+    **警告（warnings，只提示）**：目标落在受保护路径（规则空转）、
+    被同分类父目录目标覆盖（冗余）、base 指向用户数据目录却标 ``safe``。
     """
     specs = specs if specs is not None else _builtin_specs(deep=True)
     errors: list[str] = []
+    warnings: list[str] = []
     keys_seen: set[str] = set()
+    valid_specs: list[dict[str, Any]] = []
     for i, cat in enumerate(specs, start=1):
         if not isinstance(cat, dict):
             errors.append(f"分类 #{i} 不是对象")
@@ -493,6 +705,7 @@ def validate_rules(specs: list[dict[str, Any]] | None = None) -> list[str]:
         if not isinstance(key, str) or not key:
             errors.append(f"分类 #{i} 缺少字符串 key")
             continue
+        valid_specs.append(cat)
         if key in keys_seen:
             errors.append(f"分类 key 重复: {key}")
         keys_seen.add(key)
@@ -520,6 +733,13 @@ def validate_rules(specs: list[dict[str, Any]] | None = None) -> list[str]:
                 errors.append(f"{loc} 缺少 path")
             if ttype in ("glob_dirs", "glob_files", "files_by_rule") and not t.get("base"):
                 errors.append(f"{loc} 缺少 base")
+            if ttype in ("glob_dirs", "glob_files"):
+                pattern = t.get("pattern")
+                if not isinstance(pattern, str) or not pattern.strip():
+                    errors.append(
+                        f"{loc} {ttype} 必须显式给出 pattern"
+                        "（缺失时扫描器默认 '*'，会清空/删除整个 base）"
+                    )
             if ttype in ("empty_dirs", "zero_byte_files"):
                 if not t.get("base"):
                     errors.append(f"{loc} 缺少 base")
@@ -544,7 +764,38 @@ def validate_rules(specs: list[dict[str, Any]] | None = None) -> list[str]:
                     errors.append(f"{loc} 缺少 bases")
                 if not t.get("names"):
                     errors.append(f"{loc} 缺少 names")
+                max_depth = t.get("max_depth")
+                if max_depth is None:
+                    errors.append(
+                        f"{loc} find_dirs 缺少 max_depth"
+                        "（必须显式限制下探层数，否则会全树遍历）"
+                    )
+                else:
+                    try:
+                        if int(max_depth) <= 0:
+                            errors.append(f"{loc} find_dirs 的 max_depth 必须为正整数: {max_depth!r}")
+                    except (TypeError, ValueError):
+                        errors.append(f"{loc} find_dirs 的 max_depth 非法: {max_depth!r}")
             action = t.get("action")
-            if action is not None and action not in VALID_ACTIONS:
-                errors.append(f"{loc} 非法 action: {action!r}")
-    return errors
+            if action is not None:
+                if not isinstance(action, str) or action.lower() not in VALID_ACTIONS:
+                    errors.append(f"{loc} 非法 action: {action!r}（应为 clear/delete）")
+    # 只在没有结构性错误时统计警告，避免噪声淹没真正的错误
+    if not errors:
+        _warn_protected_targets(valid_specs, warnings)
+        _warn_redundant_targets(valid_specs, warnings)
+        _warn_user_data_risk(valid_specs, warnings)
+    return ValidationReport(errors, warnings)
+
+
+def validate_rules_detailed(
+    specs: list[dict[str, Any]] | None = None,
+) -> tuple[list[str], list[str]]:
+    """返回 ``(errors, warnings)`` 二元组，便于 CLI 分别输出。"""
+    report = validate_rules(specs)
+    return list(report), list(report.warnings)
+
+
+def format_rule_warnings(report: Any) -> list[str]:
+    """把校验报告里的警告渲染成可直接打印的行（供 --validate-rules 使用）。"""
+    return [f"⚠ {w}" for w in (getattr(report, "warnings", None) or [])]

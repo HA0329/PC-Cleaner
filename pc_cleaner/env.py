@@ -67,9 +67,16 @@ def _drive_roots() -> list[str]:
 
 
 def _dir_size_bytes(path: str) -> int | None:
-    """递归统计目录字节数；失败返回 None。不跟随符号链接。"""
+    """递归统计目录字节数；失败返回 None。不跟随符号链接。
+
+    v0.9.3：对 ``st_nlink > 1`` 的文件按 ``(st_dev, st_ino)`` 去重。NTFS 上
+    ``WinSxS`` / ``DriverStore`` / ``Windows\\Installer`` 大量使用硬链接，
+    逐个累加会把同一份数据重复计数（本机 WinSxS 遍历值 7.52 GB，
+    ``DISM /AnalyzeComponentStore`` 报告的真实值 4.55 GB）。
+    """
     try:
         total = 0
+        seen: set[tuple[int, int]] = set()
         for root, dirs, files in os.walk(_expand(path), followlinks=False):
             dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
             for name in files:
@@ -77,7 +84,13 @@ def _dir_size_bytes(path: str) -> int | None:
                 try:
                     if os.path.islink(fp):
                         continue
-                    total += os.path.getsize(fp)
+                    st = os.lstat(fp)
+                    if getattr(st, "st_nlink", 1) > 1:
+                        key = (getattr(st, "st_dev", 0), getattr(st, "st_ino", 0))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                    total += st.st_size
                 except OSError:
                     continue
         return total
@@ -227,12 +240,16 @@ def probe_component_stores(measure_size: bool = False) -> list[dict[str, Any]]:
             "label": "WinSxS 组件库",
             "path": _expand("%WINDIR%/WinSxS"),
             "advice": "DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase（管理员）",
+            # v0.9.3：目录遍历值会把「与系统共享的硬链接」重复计入，
+            # DISM /AnalyzeComponentStore 的「实际大小」才是权威值。
+            "size_note": "遍历值含与系统共享的硬链接，DISM 报告的实际占用更小",
         },
         {
             "key": "driverstore",
             "label": "驱动库 DriverStore",
             "path": _expand("%WINDIR%/System32/DriverStore/FileRepository"),
             "advice": "请用 pnputil /enum-drivers 逐项评估，勿直接删除",
+            "size_note": "遍历值含与系统共享的硬链接",
         },
         {
             "key": "installer",
@@ -418,7 +435,9 @@ def component_store_summary(probe: dict[str, Any]) -> list[str]:
     for item in probe.get("component_stores") or []:
         size = item.get("size_bytes")
         size_txt = format_size(size) if size is not None else "?"
+        note = item.get("size_note")
+        note_txt = f"，{note}" if note else ""
         lines.append(
-            f"{item['label']}: {item['path']}（约 {size_txt}）→ {item['advice']}"
+            f"{item['label']}: {item['path']}（约 {size_txt}{note_txt}）→ {item['advice']}"
         )
     return lines

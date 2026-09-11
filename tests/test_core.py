@@ -30,7 +30,10 @@ def test_expand_path_env(tmp_path):
     assert p.is_absolute()
 
 
-def test_protect_check(tmp_path):
+def test_protect_check(tmp_path, monkeypatch):
+    # v0.9.5：注入可移植的 WINDIR，避免该用例只在 Windows 上可测——
+    # POSIX 上 os.path.expandvars 不展开 %WINDIR%，此前在 Linux 必然失败
+    monkeypatch.setenv("WINDIR", str(tmp_path / "Windows"))
     check = make_protect_check()
     # 内置保护
     assert check(expand_path(r"%WINDIR%\System32\foo.exe")) is True

@@ -49,27 +49,59 @@ def _is_dir(*parts: str) -> bool:
     return p.is_dir()
 
 
-def _drive_roots() -> list[str]:
-    """返回本机存在的盘符根路径列表（只探测存在的盘）。"""
+def _fixed_drive_roots() -> list[str]:
+    """返回本机**本地固定盘**的盘符根路径列表（如 ``["C:\\", "D:\\"]``）。
+
+    v0.9.5 修复「启动卡顿几十秒」：旧实现逐个 ``os.path.exists("X:\\")`` 探测
+    26 个盘符，一旦存在**离线映射网络盘 / 空读卡器 / 无盘光驱**，每个盘符的
+    探测都会被 SMB / 驱动 I/O 超时阻塞（单盘可达 10~30 秒），导致交互菜单在
+    「本机适配」一行卡住很久（扫描却早已 0 秒完成——用户反馈的现象）。
+    改用 ``GetLogicalDrives`` + ``GetDriveTypeW``（纯读系统驱动器映射，
+    **不发起任何盘符 I/O**，离线网络盘也不会阻塞），并且只保留 ``DRIVE_FIXED``
+    （本地固定盘）——探测/统计只关心本地盘的缓存与回收站，可移动盘、光驱、
+    网络盘既无意义又可能阻塞。
+    """
     if sys.platform != "win32":
         return []
-    out: list[str] = []
-    import string
+    try:
+        import ctypes
+        import string
 
-    for letter in string.ascii_uppercase:
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+    except Exception:  # noqa: BLE001 只读探测失败就当作没有盘
+        return []
+    out: list[str] = []
+    for i, letter in enumerate(string.ascii_uppercase):
+        if not (mask >> i) & 1:
+            continue
         drive = f"{letter}:\\"
         try:
-            if os.path.exists(drive):
-                out.append(drive)
-        except OSError:
+            dtype = ctypes.windll.kernel32.GetDriveTypeW(drive)
+        except Exception:  # noqa: BLE001
             continue
+        # DRIVE_FIXED = 3（本地固定盘）。离线映射网络盘返回 DRIVE_REMOTE(4)，
+        # 读卡器/光驱返回 DRIVE_REMOVABLE(2) / DRIVE_CDROM(5)，全部跳过。
+        if dtype == 3:
+            out.append(drive)
     return out
 
 
+def _drive_roots() -> list[str]:
+    """返回本机存在的盘符根路径列表（只探测本地固定盘，非阻塞）。"""
+    return _fixed_drive_roots()
+
+
 def _dir_size_bytes(path: str) -> int | None:
-    """递归统计目录字节数；失败返回 None。不跟随符号链接。"""
+    """递归统计目录字节数；失败返回 None。不跟随符号链接。
+
+    v0.9.3：对 ``st_nlink > 1`` 的文件按 ``(st_dev, st_ino)`` 去重。NTFS 上
+    ``WinSxS`` / ``DriverStore`` / ``Windows\\Installer`` 大量使用硬链接，
+    逐个累加会把同一份数据重复计数（本机 WinSxS 遍历值 7.52 GB，
+    ``DISM /AnalyzeComponentStore`` 报告的真实值 4.55 GB）。
+    """
     try:
         total = 0
+        seen: set[tuple[int, int]] = set()
         for root, dirs, files in os.walk(_expand(path), followlinks=False):
             dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
             for name in files:
@@ -77,7 +109,13 @@ def _dir_size_bytes(path: str) -> int | None:
                 try:
                     if os.path.islink(fp):
                         continue
-                    total += os.path.getsize(fp)
+                    st = os.lstat(fp)
+                    if getattr(st, "st_nlink", 1) > 1:
+                        key = (getattr(st, "st_dev", 0), getattr(st, "st_ino", 0))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                    total += st.st_size
                 except OSError:
                     continue
         return total
@@ -184,23 +222,36 @@ def probe_wechat(measure_size: bool = False) -> dict[str, Any]:
 
     # 可清理的微信运行缓存（4.x）：逐项列出实际存在的目录与体积，
     # 让「微信运行缓存」分类为什么是 0 项 / 有多少可清一目了然。
+    #
+    # v0.9.8：这里列出的路径必须与 rules.json 的候选布局保持一致，并标出
+    # 「只有 --deep 才会清理」的项。此前它只探测旧布局的目录名（net/log/
+    # update/crashinfo/xplugin/plugins），在新版微信上**全部不存在**，于是体检
+    # 报告对微信缓存只字不提；而真正占了 175MB 的 radium/users 又没有出现，
+    # 用户看到的是"分类 0 项，但也不知道到底有没有可清的"。
     cleanable: list[dict[str, Any]] = []
     if roaming4:
-        candidates = [
-            ("插件模块(按需重下)", "%APPDATA%/Tencent/xwechat/xplugin/plugins"),
-            ("小程序容器缓存", "%APPDATA%/Tencent/xwechat/radium"),
-            ("网络缓存", "%APPDATA%/Tencent/xwechat/net"),
-            ("网络缓存(2)", "%APPDATA%/Tencent/xwechat/net_1"),
-            ("升级包缓存", "%APPDATA%/Tencent/xwechat/update"),
-            ("运行日志", "%APPDATA%/Tencent/xwechat/log"),
-            ("崩溃报告", "%APPDATA%/Tencent/xwechat/crashinfo"),
+        # (标签, 候选路径列表, 是否仅 --deep 生效)
+        candidates: list[tuple[str, list[str], bool]] = [
+            ("插件模块(按需重下)",
+             ["%APPDATA%/Tencent/xwechat/xplugin/plugins"], False),
+            ("网络缓存", ["%APPDATA%/Tencent/xwechat/net",
+                          "%APPDATA%/Tencent/xwechat/net_1"], False),
+            ("升级包缓存", ["%APPDATA%/Tencent/xwechat/update"], False),
+            ("运行日志", ["%APPDATA%/Tencent/xwechat/log",
+                          "%APPDATA%/Tencent/xwechat/logs"], False),
+            ("崩溃报告", ["%APPDATA%/Tencent/xwechat/crashinfo"], False),
+            ("小程序容器网页缓存", ["%APPDATA%/Tencent/xwechat/radium/web",
+                                    "%APPDATA%/Tencent/xwechat/radium/cache"], False),
+            ("小程序包缓存", ["%APPDATA%/Tencent/xwechat/radium/users"], True),
         ]
-        for label, loc in candidates:
-            p = _expand(loc)
-            if not os.path.isdir(p):
-                continue
-            size = _dir_size_bytes(p) if measure_size else None
-            cleanable.append({"label": label, "path": p, "size_bytes": size})
+        for label, locs, deep_only in candidates:
+            for loc in locs:
+                p = _expand(loc)
+                if not os.path.isdir(p):
+                    continue
+                size = _dir_size_bytes(p) if measure_size else None
+                cleanable.append({"label": label, "path": p,
+                                  "size_bytes": size, "deep_only": deep_only})
 
     return {
         "layout": layout,
@@ -227,12 +278,16 @@ def probe_component_stores(measure_size: bool = False) -> list[dict[str, Any]]:
             "label": "WinSxS 组件库",
             "path": _expand("%WINDIR%/WinSxS"),
             "advice": "DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase（管理员）",
+            # v0.9.3：目录遍历值会把「与系统共享的硬链接」重复计入，
+            # DISM /AnalyzeComponentStore 的「实际大小」才是权威值。
+            "size_note": "遍历值含与系统共享的硬链接，DISM 报告的实际占用更小",
         },
         {
             "key": "driverstore",
             "label": "驱动库 DriverStore",
             "path": _expand("%WINDIR%/System32/DriverStore/FileRepository"),
             "advice": "请用 pnputil /enum-drivers 逐项评估，勿直接删除",
+            "size_note": "遍历值含与系统共享的硬链接",
         },
         {
             "key": "installer",
@@ -324,12 +379,13 @@ def probe_environment(measure_wechat_size: bool = False) -> dict[str, Any]:
 
     全部只读；任何单项失败都不影响其它项。
     ``measure_wechat_size``：是否统计微信数据目录体积（较大时可能耗时）。
-    """
-    import string as _string
 
+    v0.9.5：磁盘用量只统计**本地固定盘**（``_drive_roots``，非阻塞枚举）。
+    旧实现盲目对 A~Z 全部盘符调用 ``shutil.disk_usage``，离线映射网络盘 /
+    空光驱会阻塞（SMB/驱动超时），交互菜单启动因此卡顿几十秒。
+    """
     drives: list[dict[str, Any]] = []
-    for letter in _string.ascii_uppercase:
-        drive = f"{letter}:\\"
+    for drive in _drive_roots():
         try:
             usage = shutil.disk_usage(drive)
         except OSError:
@@ -398,15 +454,26 @@ def wechat_data_summary(probe: dict[str, Any]) -> list[str]:
 
 
 def wechat_cleanable_summary(probe: dict[str, Any]) -> list[str]:
-    """返回微信**可清理运行缓存**的清单行（用于体检报告，与分类规则对齐）。"""
+    """返回微信**可清理运行缓存**的清单行（用于体检报告，与分类规则对齐）。
+
+    v0.9.8：标出「仅 --deep 生效」的项，避免体检报告把 175MB 说成"可清理"、
+    而用户用标准模式清理时却看到 0 项（deep_only 规则默认不启用）。
+    """
     from .models import format_size
 
     we = probe.get("wechat") or {}
     lines: list[str] = []
+    deep_items = 0
     for d in we.get("cleanable") or []:
         size = d.get("size_bytes")
         size_txt = format_size(size) if size is not None else "?"
-        lines.append(f"{d['label']}: {d['path']}（约 {size_txt}）")
+        mark = "（需 --deep）" if d.get("deep_only") else ""
+        if d.get("deep_only"):
+            deep_items += 1
+        lines.append(f"{d['label']}: {d['path']}（约 {size_txt}）{mark}")
+    if deep_items:
+        lines.append("提示：标注「需 --deep」的项默认不参与清理，"
+                     "用 --deep 或在菜单中启用深度模式才会包含。")
     return lines
 
 
@@ -418,7 +485,9 @@ def component_store_summary(probe: dict[str, Any]) -> list[str]:
     for item in probe.get("component_stores") or []:
         size = item.get("size_bytes")
         size_txt = format_size(size) if size is not None else "?"
+        note = item.get("size_note")
+        note_txt = f"，{note}" if note else ""
         lines.append(
-            f"{item['label']}: {item['path']}（约 {size_txt}）→ {item['advice']}"
+            f"{item['label']}: {item['path']}（约 {size_txt}{note_txt}）→ {item['advice']}"
         )
     return lines

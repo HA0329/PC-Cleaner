@@ -250,6 +250,8 @@ def _make_recycle_info(original: str, size: int) -> bytes:
         header
         + size.to_bytes(8, "little")
         + b"\x00" * 8
+        + b"\x00" * 4  # 目录记录长度（文件记录为 0；v0.9.5：此前缺失该字段，
+        #              # 解析器按真实格式从 offset 28 读路径时会多跳 4 字节）
         + original.encode("utf-16-le")
         + b"\x00\x00"
     )
@@ -265,7 +267,11 @@ def test_parse_recycle_info(tmp_path):
     assert parsed[1] == 4096
 
 
-def test_restore_paths_from_recycle(tmp_path):
+def test_restore_paths_from_recycle(tmp_path, monkeypatch):
+    # 回收站恢复是 Windows 专属逻辑；在其它平台也把 sys.platform 伪装成 win32，
+    # 让纯路径/字节操作的部分真正跑一遍（v0.9.5：此前在 Linux 上被平台守卫
+    # 短路，测试从未真正执行过恢复逻辑）。
+    monkeypatch.setattr(sys, "platform", "win32")
     # 构造假的回收站布局：<drive>/$Recycle.Bin/<SID>/$Ixxx + $Rxxx
     drive = tmp_path / "drive"
     sid = drive / "$Recycle.Bin" / "S-1-5-21-fake"
@@ -303,7 +309,9 @@ def test_builtin_new_targets_present():
     sys_admin_targets = specs["system_admin"]["targets"]
     labels = [t.get("label") for t in sys_admin_targets]
     assert "Windows 更新缓存" in labels
-    assert "预读取(Prefetch)" in labels
+    # v0.9.5：规则标签加了「清理后首次启动/常用程序可能变慢」的提示后缀，
+    # 断言改为前缀匹配
+    assert any(str(l).startswith("预读取(Prefetch)") for l in labels)
     # 浏览器新增 Brave / Vivaldi
     web_labels = [t.get("label") for t in specs["web_cache"]["targets"]]
     assert any("Brave" in l for l in web_labels)

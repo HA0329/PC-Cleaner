@@ -103,9 +103,14 @@ def _cmd_print_env_adaptation() -> None:
         wechat_cleanable_summary,
         wechat_data_summary,
     )
+    from .ui import Spinner
 
+    # v0.9.7：环境探测包含组件库体积统计，在慢盘上可达数秒——用加载指示器
+    # 告诉用户"在干活"。Spinner 自带 TTY 判定，非交互 / 管道场景完全静默。
     try:
-        env = probe_environment(measure_wechat_size=True)
+        with Spinner("正在探测运行环境（浏览器 / GPU / 微信 / 组件库）") as spinner:
+            env = probe_environment(measure_wechat_size=True)
+            spinner.update("正在统计组件库与微信缓存体积")
     except Exception as exc:  # noqa: BLE001
         _echo(dim(f"  （运行环境探测失败，跳过本小节: {exc}）"))
         return
@@ -234,6 +239,9 @@ def _cmd_checkup(
         try:
             u = shutil.disk_usage(drive)
             used_pct = u.used / u.total * 100 if u.total > 0 else 0
+            # v0.9.8：progress_bar() 返回值里**已经带了** " 18%"，
+            # 此前又在后面拼了一次 "{used_pct:.0f}% 已用"，于是打印成
+            # "[███░░] 18% 18% 已用"。这里去掉重复的那一次。
             bar = progress_bar(int(used_pct), 100, width=20)
             if used_pct > 90:
                 free_str = red(format_size(u.free))
@@ -241,7 +249,7 @@ def _cmd_checkup(
                 free_str = yellow(format_size(u.free))
             else:
                 free_str = green(format_size(u.free))
-            _echo(f"    {drive} {bar} {used_pct:.0f}% 已用 | 可用 {free_str} / 总 {format_size(u.total)}")
+            _echo(f"    {drive} {bar} 已用 | 可用 {free_str} / 总 {format_size(u.total)}")
         except OSError:
             continue
     if sys.platform == "win32":
@@ -376,8 +384,12 @@ def _cmd_show_rules(deep: bool = False) -> int:
     return 0
 
 
-def _cmd_validate_rules() -> int:
-    """校验 rules.json 规则格式。"""
+def _cmd_validate_rules(audit_local: bool = False) -> int:
+    """校验 rules.json 规则格式（v0.9.3：额外输出警告清单）。
+
+    ``audit_local``（v0.9.8）：额外做本机存活性审计，列出在本机匹配不到任何
+    路径的规则（如软件升级后改了目录名），由 ``--audit-rules`` 触发。
+    """
     specs = _builtin_specs(deep=True)
     errors = validate_rules(specs)
     if errors:
@@ -395,6 +407,18 @@ def _cmd_validate_rules() -> int:
             f"其中 {deep_only} 个 deep_only。"
         )
     )
+    # v0.9.3：警告不影响退出码，但会如实打印（死规则 / 冗余规则 / 风险错配）
+    warnings: list[str] = []
+    try:
+        from .rules import validate_rules_detailed
+
+        _errors, warnings = validate_rules_detailed(specs, audit_local=audit_local)
+    except Exception:  # noqa: BLE001 旧版 rules.py 无此 API 时静默跳过
+        warnings = []
+    if warnings:
+        _echo(yellow(f"⚠ 规则警告：{len(warnings)} 条（不影响退出码）"))
+        for w in warnings:
+            _echo(f"  {yellow('!')} {w}")
     return 0
 
 

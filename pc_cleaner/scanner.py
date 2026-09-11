@@ -46,6 +46,7 @@ from typing import Any, Callable, Iterator
 from .models import CategoryResult, Target, TargetAction, TargetKind, format_size  # noqa: F401
 from .rules import (
     DEFAULT_SKIP_DIRNAMES,
+    _expand_vars_cross_platform,   # v0.9.5：POSIX 上也展开 %VAR% 规则占位符
     category_label,
     get_protected_patterns,
     is_within_clear_root,
@@ -70,15 +71,58 @@ ScanProgressCB = Callable[[str, int, int], None]  # (category_label, current_spe
 # ===========================================================================
 # 路径与保护判断
 # ===========================================================================
+def _strip_trailing(s: str) -> str:
+    """去掉 Windows 会忽略的结尾空格与点（``C:\\Windows\\System32.`` ≡ System32）。
+
+    盘符根 / 目录分隔符结尾的路径保持原样。
+    """
+    if not s or s.endswith(("\\", "/")):
+        return s
+    return s.rstrip(" .") or s
+
+
 def expand_path(path_str: str) -> Path:
-    """扩展环境变量与 ~，返回绝对 Path。"""
-    expanded = os.path.expandvars(os.path.expanduser(path_str))
-    return Path(expanded).absolute()
+    """扩展环境变量与 ~，返回**词法规范化**的绝对路径。
+
+    v0.9.3 安全增强：与 :func:`normalize`、``rules._resolve_root`` 统一词法语义，
+    使「保护判定 / 嵌套去重 / 体积缓存」对同一路径得到同一个字符串：
+
+    1. 展开 ``%VAR%`` / ``~``；
+    2. ``absolute()`` + ``normpath()`` 折叠 ``.`` 与 ``..``（此前 ``..`` 会原样保留，
+       导致扫描阶段判不出受保护、删除阶段才被引擎拒绝，预览与行为不一致）；
+    3. 去掉 Windows 扩展前缀 ``\\\\?\\``（否则绝对前缀式保护永不匹配）；
+    4. 去掉结尾空格与点。
+
+    **不跟随符号链接 / junction**（保留链接本身，供 :func:`is_reparse_point` 判定，
+    避免"顺着链接删到链接目标"）；也不展开 8.3 短名（如 ``%TEMP%`` 实际是
+    ``ADMINI~1.DES``）——8.3 别名仅影响"同一条目录同时以长短名出现在规则中"时的
+    去重效果，不影响保护判定的安全性（引擎侧仍会 ``resolve()`` 后再判一次）。
+    """
+    expanded = _expand_vars_cross_platform(str(path_str))
+    # v0.9.5：POSIX 上把 Windows 风格反斜杠统一成 os.sep，否则 %WINDIR%\Temp
+    # 这类展开结果在 Linux/macOS 上会被当成单个目录名，保护/白名单全部失配
+    if os.sep == "/":
+        expanded = expanded.replace("\\", "/")
+    try:
+        s = os.path.normpath(str(Path(expanded).absolute()))
+        if s.startswith("\\\\?\\"):
+            s = s[4:]
+    except (OSError, ValueError):
+        s = str(expanded)
+    return Path(_strip_trailing(s))
 
 
-def normalize(path: Path) -> str:
-    """返回用于大小写不敏感比较的规范化字符串。"""
-    return os.path.normcase(str(path))
+def normalize(path) -> str:
+    """返回用于大小写不敏感比较的规范化字符串（词法：normpath + 去结尾空格/点）。
+
+    与 :func:`expand_path` / ``rules._resolve_root`` 使用同一套词法语义；
+    不展开 8.3 短名、不跟随链接，保证三者对同一路径得到同一字符串。
+    """
+    try:
+        s = os.path.normpath(str(path))
+    except (OSError, ValueError):
+        s = str(path)
+    return os.path.normcase(_strip_trailing(s))
 
 
 def is_admin() -> bool:
@@ -115,8 +159,14 @@ def is_reparse_point(path: Path) -> bool:
 # 安全增强：保护路径检查
 # ===========================================================================
 def _path_components(s: str) -> list[str]:
-    """把路径拆成小写组件列表（按 / 与 \\ 分割），用于组件级全等匹配。"""
-    parts = str(s).replace("/", os.sep).split(os.sep)
+    """把路径拆成小写组件列表（按 / 与 \\ 分割），用于组件级全等匹配。
+
+    v0.9.5：先把两种分隔符统一成 ``os.sep`` 再拆分——此前只在 Windows 上
+    生效（``os.sep == "\\"``），规则里的 ``\\.git`` / ``windows\\system32``
+    等模式在 Linux / macOS 上会变成**带反斜杠的单个组件**，永远匹配不到真实
+    目录名，导致「受保护目录不被保护、体积统计不剪枝」的跨平台安全缺陷。
+    """
+    parts = str(s).replace("\\", os.sep).replace("/", os.sep).split(os.sep)
     return [p.lower() for p in parts if p and p not in (".",)]
 
 
@@ -148,6 +198,39 @@ def _is_abs_style_pattern(pattern: str) -> bool:
         return True
     # UNC 路径（\\server\share）才算绝对；单反斜杠开头只是路径片段
     return p.startswith("\\\\")
+
+
+def _clear_root_components(target: str) -> list[str]:
+    """若 target 位于某个「白名单清空根」之下，返回该根的路径组件序列。
+
+    用于区分「白名单根自身的保护模式」（如 ``windows\\temp``，应忽略）与
+    「根内混入的受保护名」（如 ``xwechat_files``，应拦截）。
+    """
+    try:
+        from . import rules as _rules
+    except Exception:  # noqa: BLE001
+        return []
+    roots = set(getattr(_rules, "ALLOWED_CLEAR_ROOTS", ()) or ())
+    roots |= set(getattr(_rules, "ALLOWED_CLEAR_UNDER_PROTECTED", ()) or ())
+    best: list[str] = []
+    for root in roots:
+        try:
+            r = os.path.normcase(
+                _strip_trailing(
+                    os.path.normpath(
+                        os.path.abspath(
+                            os.path.expandvars(os.path.expanduser(str(root)))
+                        )
+                    )
+                )
+            )
+        except (OSError, ValueError):
+            continue
+        if target == r or target.startswith(r + os.sep):
+            comps = _path_components(r)
+            if len(comps) > len(best):
+                best = comps
+    return best
 
 
 def make_protect_check(user_patterns: list[str] | None = None):
@@ -197,22 +280,32 @@ def make_protect_check(user_patterns: list[str] | None = None):
         except Exception:  # noqa: BLE001 无法转字符串则保守拒绝
             return True
 
-        # 白名单清空根内的路径不受保护（内容允许被清空，根目录本身由引擎拦截）
+        tokens = _path_components(target)
+        # 2) 相对模式：组件级全等匹配（命中任意层即受保护）
+        name_hit = any(_contains_sequence(tokens, pat) for pat in name_patterns)
+
+        # 白名单清空根：只放行「可重建的缓存内容」，**不放行其中混入的受保护名**
+        # （v0.9.3：如 C:\Windows\Temp\xwechat_files，此前会被白名单整体短路）。
+        # 若命中的名称模式同时也能在白名单根自身的组件序列里匹配到，说明它只是在
+        # "解释"白名单根本身（如 windows\temp），忽略之；否则视为真正的保护命中。
         if is_within_clear_root(target):
-            return False
+            if not name_hit:
+                return False
+            root_tokens = _clear_root_components(target)
+            if root_tokens and not any(
+                _contains_sequence(tokens, pat)
+                and not _contains_sequence(root_tokens, pat)
+                for pat in name_patterns
+            ):
+                return False
+            return True
 
         # 1) 绝对前缀匹配
         for pattern in prefixes:
             if target == pattern or target.startswith(pattern + os.sep):
                 return True
 
-        # 2) 相对模式：组件级全等匹配（命中任意层即受保护）
-        if name_patterns:
-            tokens = _path_components(target)
-            for pat in name_patterns:
-                if _contains_sequence(tokens, pat):
-                    return True
-        return False
+        return name_hit
 
     return _check
 
@@ -303,23 +396,39 @@ def _dir_size(
     同一目录被多个规则命中时只递归遍历一次，避免重复统计（目录内容
     在扫描期间视为不变；跨扫描/删除前后对比请使用新的 memo 或 None）。
     """
+    # v0.9.3 安全增强：根路径本身是符号链接 / junction 时拒绝统计。
+    # 否则 os.scandir 会跟随链接，把**链接目标**（可能是 ProgramData 之类）
+    # 的体积算进「可释放」，并让该链接成为 CLEAR 目标。
+    if is_reparse_point(path):
+        return (0, 0)
     if memo is not None:
         key = normalize(path)
         hit = memo.get(key)
         if hit is not None:
             return hit
+    # v0.9.3：硬链接去重。NTFS 上 WinSxS / DriverStore / Windows\Installer 大量使用硬链接，
+    # 逐个累加会把同一份数据重复计数（本机 WinSxS 遍历值 7.52 GB，DISM 实测真实 4.55 GB）。
+    # 只有"子树内出现过硬链接"的目录不写入 memo（其数值依赖遍历顺序）。
+    hardlinks_seen: set[tuple[int, int]] = set()
+
     # 递归统计：自底向上把**每个子目录**的结果也写入 memo，父目录测一次后，
     # 子目录规则（如 npm-cache 与 npm-cache/_npx 同时命中）直接命中缓存。
-    def _measure(cur: Path, depth: int) -> tuple[int, int]:
+    def _measure(cur: Path, depth: int) -> tuple[int, int, bool]:
+        """返回 ``(字节数, 文件数, 子树内是否出现过硬链接)``。"""
         if depth > 128:  # 深度保护（重解析点已跳过，正常不会触发）
-            return (0, 0)
+            return (0, 0, False)
+        if is_reparse_point(cur):
+            return (0, 0, False)
         key = normalize(cur)
         if memo is not None:
             hit = memo.get(key)
             if hit is not None:
-                return hit
+                # 只有"无硬链接"的子树才会进 memo，故命中时 has_link 必为 False
+                return (hit[0], hit[1], False)
         total = 0
         count = 0
+        has_link = False
+        failed = False
         try:
             with os.scandir(cur) as it:
                 for entry in it:
@@ -330,26 +439,69 @@ def _dir_size(
                         if entry.is_dir(follow_symlinks=False):
                             if is_protected(child):
                                 continue  # 整棵子树剪枝
-                            st, sc = _measure(child, depth + 1)
+                            st, sc, shl = _measure(child, depth + 1)
                             total += st
                             count += sc
+                            has_link = has_link or shl
                         else:
-                            total += entry.stat(follow_symlinks=False).st_size
+                            est = entry.stat(follow_symlinks=False)
+                            size = est.st_size
+                            if getattr(est, "st_nlink", 1) > 1:
+                                has_link = True
+                                hkey = (
+                                    getattr(est, "st_dev", 0),
+                                    getattr(est, "st_ino", 0),
+                                )
+                                if hkey in hardlinks_seen:
+                                    continue
+                                hardlinks_seen.add(hkey)
+                            total += size
                             count += 1
                     except OSError:
                         continue
         except OSError:
-            pass
-        if memo is not None:
+            # v0.9.3：读取失败的目录不再写入 memo（此前会缓存成 (0,0)，
+            # 让被占用/无权限的目录从此在预览里"消失"，且不计入 skipped）。
+            failed = True
+        if memo is not None and not failed and not has_link:
             memo[key] = (total, count)
-        return total, count
+        return total, count, has_link
 
-    return _measure(path, 0)
+    total, count, _has_link = _measure(path, 0)
+    return (total, count)
 
 
 # ===========================================================================
 # 公共过滤函数（消除重复）
 # ===========================================================================
+def _safe_glob(base: Path, pattern: str) -> Iterator[Path]:
+    """惰性遍历 glob 结果，单个条目出错不影响整条规则（v0.9.3）。
+
+    此前 ``base.glob(...)`` 的**迭代**不在任何 try 内，一个 OSError 会让整条
+    规则的结果作废（用户看到"这条规则没东西可清"，而非"部分条目读不到"）。
+    """
+    try:
+        it = base.glob(pattern)
+    except (OSError, ValueError):
+        return
+    while True:
+        try:
+            item = next(it)
+        except StopIteration:
+            return
+        except (OSError, ValueError):
+            continue
+        yield item
+
+
+def _is_file_safe(p: Path) -> bool:
+    """``p.is_file()`` 的容错版本（读不到按"不是文件"处理）。"""
+    try:
+        return p.is_file()
+    except OSError:
+        return False
+
+
 def _filter_and_build_file_targets(
     file_paths: Iterator[Path],
     category_key: str,
@@ -358,6 +510,7 @@ def _filter_and_build_file_targets(
     older_than_secs: int = 0,
     label: str = "",
     ext_filter: set[str] | None = None,
+    skip_if_in_use: bool = False,
 ) -> list[Target]:
     """从文件路径迭代器中筛选符合条件的文件，构造 Target 列表。
 
@@ -384,6 +537,9 @@ def _filter_and_build_file_targets(
                 continue
         except OSError:
             continue
+        if is_reparse_point(p):
+            # v0.9.3：链接指向的文件不当作本地文件（体积虚高 + 删除必然失败）
+            continue
         if is_protected(p):
             continue
         if ext_filter is not None and p.suffix.lower() not in ext_filter:
@@ -406,6 +562,7 @@ def _filter_and_build_file_targets(
                 size=st.st_size,
                 file_count=1,
                 label=label,
+                skip_if_in_use=skip_if_in_use,
             )
         )
     return targets
@@ -439,29 +596,64 @@ def _parse_ext_set(spec: dict[str, Any]) -> set[str] | None:
 # ===========================================================================
 # 各类 target 的扫描实现
 # ===========================================================================
+def _candidate_paths(spec: dict[str, Any]) -> list[Path]:
+    """取出规则的所有候选路径（``path`` + 可选 ``paths``），展开并去重。
+
+    v0.9.8：用于「同一软件不同版本目录布局」的兼容。给出多个候选路径后，
+    存在哪个就清理哪个；只写 ``path`` 的老规则行为完全不变。
+    """
+    raw: list[str] = []
+    if isinstance(spec.get("path"), str) and spec["path"]:
+        raw.append(spec["path"])
+    extra = spec.get("paths")
+    if isinstance(extra, (list, tuple)):
+        raw.extend(p for p in extra if isinstance(p, str) and p)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for r in raw:
+        try:
+            p = expand_path(r)
+        except Exception:  # noqa: BLE001 单个候选路径展开失败不影响其它候选
+            continue
+        key = normalize(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
 def _scan_clear_dir(
     spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
 ) -> list[Target]:
-    base = expand_path(spec["path"])
-    if not base.exists() or not base.is_dir():
-        return []
-    if is_protected(base):
-        return []
-    size, count = _dir_size(base, is_protected, memo=size_memo)
-    if size == 0 and count == 0:
-        return []
     label = spec.get("label", "")
-    return [
-        Target(
-            path=base,
-            kind=TargetKind.DIR,
-            action=TargetAction.CLEAR,
-            category=category_key,
-            size=size,
-            file_count=count,
-            label=label,
+    targets: list[Target] = []
+    for base in _candidate_paths(spec):
+        if not base.exists() or not base.is_dir():
+            continue
+        if is_reparse_point(base):
+            # v0.9.3 安全增强：目标本身是符号链接 / junction 时拒绝。
+            # 此前只对"子项"判重解析点，CLEAR 根若是链接（如 C:\Users\All Users
+            # → C:\ProgramData），会顺着链接清空**链接目标**的内容。
+            logger.warning("跳过符号链接/junction 清空目标（不跟随链接）: %s", base)
+            continue
+        if is_protected(base):
+            continue
+        size, count = _dir_size(base, is_protected, memo=size_memo)
+        if size == 0 and count == 0:
+            continue
+        targets.append(
+            Target(
+                path=base,
+                kind=TargetKind.DIR,
+                action=TargetAction.CLEAR,
+                category=category_key,
+                size=size,
+                file_count=count,
+                label=label,
+                skip_if_in_use=bool(spec.get("skip_if_in_use")),
+            )
         )
-    ]
+    return targets
 
 
 def _scan_delete_dir(
@@ -469,6 +661,9 @@ def _scan_delete_dir(
 ) -> list[Target]:
     base = expand_path(spec["path"])
     if not base.exists() or not base.is_dir():
+        return []
+    if is_reparse_point(base):
+        logger.warning("跳过符号链接/junction 删除目标（不跟随链接）: %s", base)
         return []
     if is_protected(base):
         return []
@@ -483,6 +678,7 @@ def _scan_delete_dir(
             size=size,
             file_count=count,
             label=label,
+            skip_if_in_use=bool(spec.get("skip_if_in_use")),
         )
     ]
 
@@ -490,43 +686,80 @@ def _scan_delete_dir(
 def _scan_glob_dirs(
     spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
 ) -> list[Target]:
-    base_str = spec.get("base", "")
-    if not base_str:
+    # v0.9.8：支持 ``bases``（多基目录）以兼容同一软件的**不同版本目录布局**。
+    # 例：微信 4.x 的小程序缓存早期版本在 ``radium/web``、新版在 ``radium/cache``；
+    # 只写一个路径会导致在另一种布局的机器上规则静默空转。给出候选基目录后，
+    # 存在哪个就扫哪个（都存在的机器上两者都会被清理），互不影响。
+    # 仍保留原有单 ``base`` 写法，老规则与自定义规则完全兼容。
+    raw_bases: list[str] = []
+    if isinstance(spec.get("base"), str) and spec["base"]:
+        raw_bases.append(spec["base"])
+    extra = spec.get("bases")
+    if isinstance(extra, (list, tuple)):
+        raw_bases.extend(b for b in extra if isinstance(b, str) and b)
+    if not raw_bases:
         return []
-    base = expand_path(base_str)
-    if not base.exists():
+    # v0.9.3 安全增强：pattern 必须显式给出。此前缺省 "*" 会让一条"漏写 pattern"
+    # 的规则变成"清空 base 下所有子目录"。
+    pattern = spec.get("pattern")
+    if not pattern:
+        logger.warning("规则缺少 pattern，已跳过（避免误清空整个 base）: base=%s",
+                       raw_bases[0])
         return []
-    pattern = spec.get("pattern", "*")
-    action = spec.get("action", "clear")
+    action = str(spec.get("action", "clear") or "clear").lower()
+    if action not in ("clear", "delete"):
+        logger.warning("规则 action 非法(%r)，按 clear 处理: base=%s", spec.get("action"), raw_bases[0])
+        action = "clear"
     label = spec.get("label", "")
-    targets: list[Target] = []
-    try:
-        matches = base.glob(pattern)
-    except (OSError, ValueError):
-        return []
-    for m in matches:
+    skip_in_use = bool(spec.get("skip_if_in_use"))
+
+    # 展开并按规范化路径去重（多个基目录可能指向同一处）
+    bases: list[Path] = []
+    seen_bases: set[str] = set()
+    for rb in raw_bases:
         try:
-            if not m.is_dir():
+            b = expand_path(rb)
+        except Exception:  # noqa: BLE001 单个路径展开失败不影响其它候选
+            continue
+        key = normalize(b)
+        if key not in seen_bases:
+            seen_bases.add(key)
+            bases.append(b)
+
+    act = TargetAction.CLEAR if action == "clear" else TargetAction.DELETE
+    targets: list[Target] = []
+    seen_targets: set[str] = set()
+    for base in bases:
+        if not base.exists():
+            continue
+        for m in _safe_glob(base, pattern):
+            try:
+                if is_reparse_point(m) or not m.is_dir():
+                    continue
+            except OSError:
                 continue
-        except OSError:
-            continue
-        if is_protected(m):
-            continue
-        size, count = _dir_size(m, is_protected, memo=size_memo)
-        if size == 0 and count == 0:
-            continue
-        act = TargetAction.CLEAR if action == "clear" else TargetAction.DELETE
-        targets.append(
-            Target(
-                path=m,
-                kind=TargetKind.DIR,
-                action=act,
-                category=category_key,
-                size=size,
-                file_count=count,
-                label=label,
+            if is_protected(m):
+                continue
+            # 多基目录去重：同一物理目录只产出一个目标，避免重复统计/重复删除
+            tkey = normalize(m)
+            if tkey in seen_targets:
+                continue
+            seen_targets.add(tkey)
+            size, count = _dir_size(m, is_protected, memo=size_memo)
+            if size == 0 and count == 0:
+                continue
+            targets.append(
+                Target(
+                    path=m,
+                    kind=TargetKind.DIR,
+                    action=act,
+                    category=category_key,
+                    size=size,
+                    file_count=count,
+                    label=label,
+                    skip_if_in_use=skip_in_use,
+                )
             )
-        )
     return targets
 
 
@@ -539,25 +772,26 @@ def _scan_glob_files(
     base = expand_path(base_str)
     if not base.exists():
         return []
-    pattern = spec.get("pattern", "*")
+    # v0.9.3：pattern 必须显式给出（缺省 "*" 会误删整个 base 下的文件）
+    pattern = spec.get("pattern")
+    if not pattern:
+        logger.warning("规则缺少 pattern，已跳过（避免误删整个 base 下的文件）: base=%s", base_str)
+        return []
     label = spec.get("label", "")
     min_size_bytes = int(spec.get("min_size_mb", 0) or 0) * 1024 * 1024
     older_than_secs = int(spec.get("older_than_days", 0) or 0) * 86400
 
-    try:
-        matches = base.glob(pattern)
-    except (OSError, ValueError):
-        return []
-
     # 复用公共过滤函数：传入生成器，惰性过滤
+    # （_safe_glob 保证单个条目 OSError 不会让整条规则的结果作废）
     return _filter_and_build_file_targets(
-        (m for m in matches if m.is_file()),  # 仅保留文件
+        (m for m in _safe_glob(base, pattern) if _is_file_safe(m)),
         category_key,
         is_protected,
         min_size_bytes=min_size_bytes,
         older_than_secs=older_than_secs,
         label=label,
         ext_filter=_parse_ext_set(spec),
+        skip_if_in_use=bool(spec.get("skip_if_in_use")),
     )
 
 
@@ -616,10 +850,11 @@ def _scan_find_dirs(
     label = spec.get("label", "")
     seen: set[str] = set()
     targets: list[Target] = []
+    skip_in_use = bool(spec.get("skip_if_in_use"))
     for base in bases:
         if not base.exists() or not base.is_dir():
             continue
-        if is_protected(base):
+        if is_reparse_point(base) or is_protected(base):
             continue
         # 只遍历一层找到候选目录名；找到后不下降（它们本身就是待删目标）
         # 这里仍然使用 DEFAULT_SKIP_DIRNAMES 以加速查找
@@ -627,6 +862,8 @@ def _scan_find_dirs(
             if not is_dir:
                 continue
             if child.name.lower() in names:
+                if is_reparse_point(child):
+                    continue  # v0.9.3：不把链接当作删除目标
                 key = normalize(child)
                 if key in seen:
                     continue
@@ -643,6 +880,7 @@ def _scan_find_dirs(
                         size=size,
                         file_count=count,
                         label=label,
+                        skip_if_in_use=skip_in_use,
                     )
                 )
     return targets
@@ -675,6 +913,7 @@ def _scan_files_by_rule(
         older_than_secs=older_than_secs,
         label=label,
         ext_filter=ext_filter,
+        skip_if_in_use=bool(spec.get("skip_if_in_use")),
     )
     if pattern:
         # 额外按通配符过滤（如 base 下只需 *.log）：用 fnmatch 匹配文件名
@@ -796,6 +1035,29 @@ def _scan_zero_byte_files(
     return targets
 
 
+def _sqlite_reclaimable(path: Path) -> int:
+    """估算 SQLite 库执行 VACUUM 可回收的字节数（空闲页数 × 页大小）。
+
+    v0.9.3 修正：此前直接把**整库大小**当作"可释放"，让 ``database_compact``
+    （safe 分类）把合计数字虚高——History 库 500 MB 就虚报 500 MB，而 VACUUM
+    通常只回收几个百分点的空闲页。只读打开，失败返回 0。
+    """
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            page = con.execute("PRAGMA page_size").fetchone()
+            free = con.execute("PRAGMA freelist_count").fetchone()
+        finally:
+            con.close()
+        if not page or not free:
+            return 0
+        return max(int(page[0]) * int(free[0]), 0)
+    except (sqlite3.Error, OSError, TypeError, ValueError, IndexError):
+        return 0
+
+
 def _scan_compact_db(
     spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
 ) -> list[Target]:
@@ -811,32 +1073,30 @@ def _scan_compact_db(
     base = expand_path(base_str)
     if not base.exists() or not base.is_dir():
         return []
-    pattern = spec.get("pattern", "*")
-    label = spec.get("label", "")
-    try:
-        matches = base.glob(pattern)
-    except (OSError, ValueError):
+    pattern = spec.get("pattern")
+    if not pattern:
+        logger.warning("compact_db 规则缺少 pattern，已跳过: base=%s", base_str)
         return []
+    label = spec.get("label", "")
     targets: list[Target] = []
-    for m in matches:
+    for m in _safe_glob(base, pattern):
         try:
-            if not m.is_file():
+            if is_reparse_point(m) or not m.is_file():
                 continue
         except OSError:
             continue
         if is_protected(m):
             continue
-        try:
-            st = m.stat()
-        except OSError:
-            continue
+        reclaimable = _sqlite_reclaimable(m)
+        if reclaimable <= 0:
+            continue  # 无碎片可回收，不占预览位置
         targets.append(
             Target(
                 path=m,
                 kind=TargetKind.FILE,
                 action=TargetAction.COMPACT,
                 category=category_key,
-                size=st.st_size,
+                size=reclaimable,
                 file_count=1,
                 label=label,
             )
@@ -1044,6 +1304,7 @@ def scan_all(
     scan_depth: int = 20,
     on_progress: ScanProgressCB | None = None,
     workers: int = 0,
+    on_category_done: Callable[[CategoryResult], None] | None = None,
 ) -> list[CategoryResult]:
     """扫描所有分类（不含回收站），返回结果列表。
 
@@ -1058,6 +1319,9 @@ def scan_all(
     ``on_progress``：扫描进度回调 (category_label, current_idx, total)。
     ``workers``：并行扫描线程数（>1 时启用；目录遍历是 I/O 密集，线程池即可提速）。
     结果顺序始终与 ``specs`` 顺序一致，与 ``workers`` 取值无关。
+    ``on_category_done``：**每个分类扫完即回调**（v0.9.7 新增），并行模式下也
+    按完成顺序实时触发，用于累加"已找到目标/字节数"等实时统计——此前并行
+    模式要等全部扫完才一次性回放进度，进度条形同虚设。
     """
     is_protected = make_protect_check()
     size_memo: dict[str, tuple[int, int]] = {}
@@ -1065,7 +1329,7 @@ def scan_all(
     total = len(scan_specs)
 
     if workers and workers > 1 and total > 1:
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         slots: list[CategoryResult | None] = [None] * total
         with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
@@ -1075,35 +1339,49 @@ def scan_all(
                 ): i
                 for i, spec in enumerate(scan_specs)
             }
-            for fut, idx in futures.items():
+            # v0.9.7：按**完成顺序**回放进度（此前是提交顺序 + 全部扫完才回调，
+            # 并行扫描时进度条形同虚设）。结果仍按 slots 下标保证顺序稳定。
+            done = 0
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                done += 1
                 try:
-                    slots[idx] = fut.result()
+                    result = fut.result()
                 except Exception as exc:  # noqa: BLE001 单分类失败不影响其它分类
                     logger.exception("分类扫描线程异常: %s", exc)
                     spec = scan_specs[idx]
-                    slots[idx] = CategoryResult(
+                    result = CategoryResult(
                         key=str(spec.get("key") or "?"),
                         label=spec.get("label") or category_label(str(spec.get("key") or "?")),
                         risk=str(spec.get("risk") or "safe"),
                         scanned=True,
                     )
+                slots[idx] = result
+                if on_progress:
+                    on_progress(result.label, done, total)
+                if on_category_done:
+                    try:
+                        on_category_done(result)
+                    except Exception:  # noqa: BLE001 统计回调异常不影响扫描
+                        logger.debug("on_category_done 回调异常", exc_info=True)
         ordered = [r for r in slots if r is not None]
-        if on_progress:
-            for i, r in enumerate(ordered, start=1):
-                on_progress(r.label, i, total)
     else:
         ordered = []
         for idx, spec in enumerate(scan_specs, start=1):
-            ordered.append(
-                scan_spec(
-                    spec, is_protected,
-                    scan_depth=scan_depth,
-                    on_progress=on_progress,
-                    progress_idx=idx,
-                    progress_total=total,
-                    size_memo=size_memo,
-                )
+            result = scan_spec(
+                spec, is_protected,
+                scan_depth=scan_depth,
+                on_progress=on_progress,
+                progress_idx=idx,
+                progress_total=total,
+                size_memo=size_memo,
             )
+            ordered.append(result)
+            if on_category_done:
+                try:
+                    on_category_done(result)
+                except Exception:  # noqa: BLE001 统计回调异常不影响扫描
+                    logger.debug("on_category_done 回调异常", exc_info=True)
 
     # 跨分类去重 + 跨分类嵌套目标去重（父目录目标覆盖子目录目标）
     seen_paths: set[str] = set()
@@ -1171,17 +1449,41 @@ def _tree_size_no_links(root: Path) -> int:
 
 
 def _system_drives() -> list[str]:
-    """返回本机存在的盘符根路径列表，如 ``["C:\\", "D:\\"]``。"""
+    """返回本机存在的盘符根路径列表，如 ``["C:\\", "D:\\"]``。
+
+    v0.9.3：改用 ``GetLogicalDrives`` + ``GetDriveTypeW``，避免逐个
+    ``os.path.exists("X:\\")`` 探测 26 个盘符时被离线的映射网络盘 /
+    空读卡器阻塞（回收站统计会调用它）。
+    v0.9.5：进一步**只保留本地固定盘**（``DRIVE_FIXED``）。可移动盘 / 光驱 /
+    网络盘上没有可清理的回收站，但对它们做 ``$Recycle.Bin`` 的 ``is_dir`` /
+    遍历 I/O 仍可能阻塞（离线网络盘 SMB 超时、空读卡器驱动超时），
+    同样会让菜单启动 / 回收站统计卡顿。
+    """
+    if sys.platform != "win32":
+        return []
     import string
 
+    try:
+        import ctypes
+
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+    except Exception:  # noqa: BLE001
+        return []
     out: list[str] = []
-    for letter in string.ascii_uppercase:
+    for i, letter in enumerate(string.ascii_uppercase):
+        if not (mask >> i) & 1:
+            continue
         drive = f"{letter}:\\"
         try:
-            if os.path.exists(drive):
-                out.append(drive)
-        except OSError:
+            import ctypes
+
+            dtype = ctypes.windll.kernel32.GetDriveTypeW(drive)
+        except Exception:  # noqa: BLE001
             continue
+        # DRIVE_FIXED = 3（本地固定盘）。离线映射网络盘返回 DRIVE_REMOTE(4)，
+        # 读卡器/光驱返回 DRIVE_REMOVABLE(2) / DRIVE_CDROM(5)，全部跳过。
+        if dtype == 3:
+            out.append(drive)
     return out
 
 

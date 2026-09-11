@@ -52,6 +52,10 @@ class Target:
     file_count: int = 1
     #: 可选的标签描述（来自规则定义）
     label: str = ""
+    #: v0.9.3：规则声明 ``skip_if_in_use`` —— 目标被运行中进程占用时引擎跳过。
+    #: 典型场景：npm ``_npx`` 目录里可能正跑着 npx 安装的 CLI / AI 工具，
+    #: 清掉会让它们"当场不报错、下次启动才崩"。
+    skip_if_in_use: bool = False
 
     @property
     def display_size(self) -> str:

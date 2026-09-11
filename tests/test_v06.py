@@ -72,10 +72,10 @@ def test_deep_mode_gates_deep_only_targets():
     assert not any(_has_deep_only(s) for s in normal.values())
     # deep 模式包含 deep_only 规则
     assert any(_has_deep_only(s) for s in deep.values())
-    # 既有标签仍在（规则外置未丢失）
+    # 既有标签仍在（规则外置未丢失；v0.9.5：Prefetch 标签带提示后缀，改前缀匹配）
     labels = [t.get("label") for t in normal["system_admin"]["targets"]]
     assert "Windows 更新缓存" in labels
-    assert "预读取(Prefetch)" in labels
+    assert any(str(l).startswith("预读取(Prefetch)") for l in labels)
 
 
 # ---------------------------------------------------------------------------

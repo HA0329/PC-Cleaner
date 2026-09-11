@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pc-junk-cleaner"
-version = "0.9.2"
+version = "0.9.8"
 description = "为个人电脑定制的安全垃圾清理工具 (Windows 优先)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -21,13 +21,16 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
-dependencies = []
+# v0.9.3：send2trash 改为**必需依赖**。
+# 此前它是可选 extra，未安装时工具会静默降级为永久删除，
+# 与「安全第一 / 可撤销」的产品定位矛盾（默认进回收站才可恢复）。
+dependencies = ["send2trash>=1.8"]
 
 [project.optional-dependencies]
-# 删除到回收站（可恢复，推荐）。未安装时自动降级为永久删除并提示。
-recycle = ["send2trash>=1.8"]
+# 兼容旧写法：send2trash 已是必需依赖，此 extra 保留为空
+recycle = []
 dev = ["pytest>=7"]
-all = ["send2trash>=1.8", "pytest>=7"]
+all = ["pytest>=7"]
 
 [project.scripts]
 pc-junk-cleaner = "pc_cleaner.cli:main"
@@ -36,7 +39,7 @@ pc-junk-cleaner = "pc_cleaner.cli:main"
 include = ["pc_cleaner*"]
 
 [tool.setuptools.package-data]
-pc_cleaner = ["rules.json"]
+pc_cleaner = ["rules.json", "locales/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

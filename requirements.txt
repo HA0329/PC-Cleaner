@@ -1,5 +1,9 @@
-# 运行时使用 Python 标准库即可，无需额外依赖。
-# 建议安装 send2trash，让删除默认进入回收站（可恢复，更安全）：
-#   pip install send2trash
-# 或一次性安装全部（含开发依赖）：
-#   pip install -e ".[all]"
+# 运行时依赖（v0.9.4 起 send2trash 为**必需依赖**：删除默认进回收站、可恢复）
+send2trash>=1.8
+
+# 安装方式（推荐用 pyproject，而不是手动装 requirements）：
+#   pip install -e .            # 运行时
+#   pip install -e ".[dev]"     # 运行时 + pytest
+#   pip install -e ".[all]"     # 同上（兼容旧写法）
+#
+# 说明：本文件的唯一作用是给不读 pyproject.toml 的旧工具/CI 一个等价入口。

@@ -58,6 +58,12 @@ def _write(path: Path, size: int) -> Path:
     return path
 
 
+def _leaf(path: Path) -> str:
+    """取路径最后一级（v0.9.5：跨平台——Windows 反斜杠在 POSIX 上不是分隔符，
+    ``Path(r"C:\\X\\npm-cache").name`` 在 Linux 上会返回整串路径）。"""
+    return Path(str(path).replace("\\", os.sep)).name
+
+
 # ---------------------------------------------------------------------------
 # 1. 嵌套目标去重
 # ---------------------------------------------------------------------------
@@ -82,7 +88,7 @@ def test_drop_subsumed_removes_nested_targets():
             _mk_target(other, 40),
         ]
     )
-    names = sorted(t.path.name for t in kept)
+    names = sorted(_leaf(t.path) for t in kept)
     assert names == ["corepack", "npm-cache"]
     assert dropped == 2
 
@@ -106,7 +112,7 @@ def test_drop_subsumed_keeps_compact_targets():
             _mk_target(parent / "Cache" / "data_0", 5, kind=TargetKind.FILE, action=TargetAction.DELETE),
         ]
     )
-    kept_names = sorted(t.path.name for t in kept)
+    kept_names = sorted(_leaf(t.path) for t in kept)
     assert kept_names == ["History", "profile"]   # COMPACT 保留，普通文件被覆盖
     assert dropped == 1
 
@@ -662,6 +668,10 @@ def test_restore_paths_restores_recycled_children(tmp_path, monkeypatch):
     """目标目录的内容被逐个回收时，--undo-last 应能逐条还原。"""
     import pc_cleaner.engine as engine
 
+    # 回收站恢复是 Windows 专属逻辑；在其它平台伪装 win32，让纯路径/字节
+    # 操作真正跑一遍（v0.9.5：此前被平台守卫短路，逻辑从未在 Linux 上执行）
+    monkeypatch.setattr(sys, "platform", "win32")
+
     drive = tmp_path / "drive"
     drive.mkdir()
     sid = drive / "$Recycle.Bin" / "S-1-5-21-0-0-0-1001"
@@ -685,9 +695,11 @@ def test_restore_paths_restores_recycled_children(tmp_path, monkeypatch):
     assert not list(sid.glob("$Ia"))
 
 
-def test_restore_paths_restores_recycled_parent(tmp_path):
+def test_restore_paths_restores_recycled_parent(tmp_path, monkeypatch):
     """父目录被整体回收时，请求子路径也应能恢复（还原父目录）。"""
     import pc_cleaner.engine as engine
+
+    monkeypatch.setattr(sys, "platform", "win32")  # 非 Windows 平台也执行恢复逻辑
 
     drive = tmp_path / "drive"
     drive.mkdir()
@@ -705,8 +717,10 @@ def test_restore_paths_restores_recycled_parent(tmp_path):
     assert (parent / "f.bin").exists()
 
 
-def test_restore_paths_skips_when_original_exists(tmp_path):
+def test_restore_paths_skips_when_original_exists(tmp_path, monkeypatch):
     import pc_cleaner.engine as engine
+
+    monkeypatch.setattr(sys, "platform", "win32")  # 非 Windows 平台也执行恢复逻辑
 
     drive = tmp_path / "drive"
     drive.mkdir()

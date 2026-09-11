@@ -43,7 +43,7 @@ def audit_path() -> Path:
 DEFAULTS: dict[str, Any] = {
     "recycle_by_default": True,      # 默认是否删除到回收站
     "recycle_error_fallback": False,  # 进回收站失败时是否回退为永久删除（默认否，更安全）
-    "protected_paths": [],           # 额外保护路径（子串匹配，大小写不敏感）
+    "protected_paths": [],           # 额外保护路径（组件级全等 + 绝对前缀匹配，大小写不敏感）
     "custom_rules": [],              # 自定义清理规则
     "dev_artifact_bases": [],        # find_dirs 的额外基目录（默认含当前工作目录）
     "enabled_categories": [],        # 非空时只扫描这些分类（其余分类隐藏）
@@ -57,6 +57,8 @@ DEFAULTS: dict[str, Any] = {
     "show_scan_progress": True,      # 扫描时是否显示进度提示
     "compact_tree_view": False,      # 是否默认使用紧凑树形视图
     "all_includes_recycle_bin": False,  # --all 是否连带清空回收站（默认否，更安全）
+    # v0.9.4：界面语言（"" = 跟随环境变量 PC_CLEANER_LANG，再回退 zh_CN）
+    "language": "",
 }
 
 

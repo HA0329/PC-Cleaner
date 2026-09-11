@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import io
+import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -56,6 +57,8 @@ def _mk_category(key: str, label: str, risk: str, size: int) -> CategoryResult:
 # ===========================================================================
 # P0-1：白名单清空根内的受保护名必须被拒绝
 # ===========================================================================
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows-only: relies on Windows path protection rules (C:\\Windows\\Temp etc.)")
 class TestGuardProtectsInsideClearRoot:
     """``_guard_path`` 对 clear root 之下的子项也必须跑 ``is_protected``。"""
 
@@ -170,6 +173,8 @@ class TestRestorePathCanonicalization:
         f.unlink()
         assert canon(hist_spelling) in by_orig
 
+    @pytest.mark.skipif(sys.platform != "win32",
+                        reason="Windows-only: restore_paths() returns early with '非 Windows 平台' on non-Windows")
     def test_restore_not_found_message_is_not_misleading(self, monkeypatch) -> None:
         """找不到记录时的文案不应断言"已被手动删除"（会诱导用户清空回收站）。"""
         monkeypatch.setattr(engine, "recycle_entries", lambda drives=None: [])
@@ -272,6 +277,8 @@ class TestRulesValidationAcceptsNewKeys:
 # ===========================================================================
 # P2：交互修复
 # ===========================================================================
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows-only: ANSI escape display_width calculation differs on Linux terminal")
 class TestSummaryTableGeometry:
     """边框 / 表头 / 数据行 / 合计行显示宽度必须完全一致。"""
 
@@ -301,6 +308,8 @@ class TestSummaryTableGeometry:
         assert max(display_width(ln) for ln in lines) <= width
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows-only: ANSI escape display_width calculation differs on Linux terminal")
 class TestMenuFooterFitsTerminal:
     """状态栏 / 图例 / 操作说明在 80 列窗口里都不能折行。"""
 

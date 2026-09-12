@@ -1,6 +1,6 @@
 # 🧹 PC Junk Cleaner
 
-> 为**个人电脑**定制的安全垃圾清理工具（Windows 优先）。
+> 为**个人电脑**定制的安全垃圾清理工具（**只适配 Windows**）。
 > 先预览后确认 · 默认进回收站可撤销 · 二次防御防误删 · 风险分级 · 审计留痕 · 只读体检。
 
 以**安全为第一优先级**：不会直接删东西，而是先扫描、告诉你每个分类能释放多少、列出将删除的
@@ -136,11 +136,21 @@ python -m pc_cleaner             # 进入交互式菜单
 
 ## 🚀 快速开始
 
-要求：Python 3.10+（推荐 3.12）。
+要求：**Windows + Python 3.12**（本工具只适配 Windows；Python 也只支持 3.12+，见下方说明）。
 
 > ⚠️ `python -m pc_cleaner` 必须在**项目根目录**（含 `pc_cleaner/`、`pyproject.toml` 的那层）运行，
 > 不要进入 `pc_cleaner/` 子目录。测试同理：在项目根目录执行 `pytest`（在别的目录跑会因
 > 找不到 `pc_cleaner` 包而整批 collection error）。
+>
+> ⚠️ **只适配 Windows**：清理规则路径、回收站、注册表扫描、失效快捷方式、UAC 提权
+> 全部依赖 Windows 专有 API 与路径语义。非 Windows 平台会在启动时直接给出中文提示
+> 并退出（不做"半个跨平台"）。
+>
+> ⚠️ **只支持 Python 3.12+**：源码使用 PEP 701 的 f-string 语法（内层 f-string 与外层
+> 同引号，如 `f"{dim(f'…')}"`）。在 3.10 / 3.11 上这会**在解析阶段**就报
+> `SyntaxError: unterminated string literal`（看起来完全不像版本问题）。
+> `pyproject.toml` 已声明 `requires-python = ">=3.12"`，`python -m pc_cleaner` 与
+> `pc_cleaner.bat` 也会在启动时先做 Python 版本与平台检查。
 
 ```bash
 pip install -e .                          # send2trash 随包安装，删除默认进回收站
@@ -348,7 +358,7 @@ pc_cleaner/
 ├── ui.py / console.py     # 输出、确认、进度 / ANSI 颜色与 CJK 对齐
 ├── proc.py / config.py    # 进程占用检测 / 配置读写
 docs/                      # mcp.md、json-contract.md
-tests/                     # 352 个单元测试
+tests/                     # 357 个单元测试
 ```
 
 ---
@@ -357,10 +367,10 @@ tests/                     # 352 个单元测试
 
 ```bash
 pip install -e ".[dev]"
-pytest        # 352 passed（须在项目根目录运行，见上方提示）
+pytest        # 357 passed（须在项目根目录运行，见上方提示）
 ```
 
-CI 在 **Windows + Linux × Python 3.10/3.12/3.13** 矩阵上跑同一套
+CI 在 **Windows + Linux × Python 3.12** 矩阵上跑同一套
 （Linux 上 Windows 专属用例由 `skipif` 跳过）。各测试文件的覆盖点见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---

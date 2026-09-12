@@ -6,7 +6,7 @@
 > 两条主线：①"承诺与实现不一致"的地方全部对齐（README 说不会静默降级，代码其实会；
 > 配置说禁用了某分类，Agent 其实照样能删）；②报数与退出码如实
 > （删了多少、释放了多少、恢复到什么程度，都必须能对上）。
-> 全部修复都配了回归测试，测试数 298 → 352（含 54 个新守门用例）。
+> 全部修复都配了回归测试，测试数 298 → 357（含 59 个新守门用例）。
 
 ### 安全修复（重要）
 
@@ -129,12 +129,31 @@
     新增 `_offline_volume_target()` helper，按平台给出等价目标
     （Windows 用未挂载盘符，POSIX 用不存在的挂载点），**两个平台都保留真实断言**。
 
+### 平台与解释器边界（只适配 Windows）
+
+- **CI 矩阵收敛为 Windows + Python 3.12**：此前是 `windows/ubuntu × 3.10/3.12/3.13`。
+  ubuntu 长期飘红，根因是"半个跨平台"（规则路径、回收站、注册表、失效快捷方式、
+  UAC 提权全是 Windows 专属语义）；3.10 卡在 `Byte-compile` —— 源码使用了 PEP 701 的
+  f-string 写法（内层 f-string 与外层同引号，如 `f"{dim(f'…')}"`），**3.10/3.11 在
+  解析阶段就 `SyntaxError: unterminated string literal`**，也就是说 3.10/3.11 上程序
+  从来就起不来；3.13 上健康检查项数会因慢项预算而抖动。
+- **门禁前置**：`_launcher.py` 与 `pc_cleaner/__main__.py` 都在**导入 cli 之前**检查
+  Python 版本（3.12+）与平台（Windows），非 Windows / 旧解释器得到一句中文说明而不是
+  traceback；`pyproject.toml` 改为 `requires-python = ">=3.12"`，classifier 只留 3.12。
+- **撤回上一轮为 Linux 加的绕行**：测试里的跨平台等价写法（POSIX 挂载点、`os.sep`
+  拼接相对段、`_WINDOWS_ONLY` 跳过标记）全部还原为直白的 Windows 语义；同时**保留**
+  代码里原有的 `sys.platform != "win32"` 防御性早返回（回收站、注册表、管理员判定等），
+  它们在异常调用下给出可读结果而不是崩栈。
+- 新增 `TestPlatformGate`（5 个用例）守门：门禁必须存在且位于导入 cli 之前、
+  `pyproject.toml` 必须 `>=3.12` 且不含 3.10/3.13 classifier、CI 不得再出现非 Windows
+  矩阵、README 必须写明"只适配 Windows"。
+
 ### 文档与仓库
 
 - README：分类数 29 → 30（补 `rdp_legacy_cache` 行）、`--deep` 会同时把遍历深度
   提到至少 50 层、安全保证第 2/9/10 条按新行为重写、`--json` 契约补 `vanished`、
-  修掉第 165 行少一个换行导致错行的表格、测试数 296 → 314，
-  并写明"测试须在项目根目录运行"。
+  修掉第 165 行少一个换行导致错行的表格、测试数按实际用例数同步，
+  并写明"测试须在项目根目录运行""只适配 Windows + Python 3.12"。
 - `docs/mcp.md` / `docs/json-contract.md`：补 `enabled_categories` 约束、
   `undo` 的 `failed`/`partial` 语义、`delete` 的 `vanished`/`already_gone` 字段、
   `action.vanished` 字段说明，以及 `--json-schema` 的对应更新。
@@ -142,7 +161,7 @@
 
 ### 测试
 
-- 新增 `tests/test_v0910_fixes.py`（54 个用例）：回收站不可用时的整批拒绝（文件与
+- 新增 `tests/test_v0910_fixes.py`（59 个用例）：回收站不可用时的整批拒绝（文件与
   清空目录两条路径）、`vanished` 不计入 `deleted`/`freed`、`freed` 实测差、
   recycle_bin 矛盾输入（CLI + `--json`）、MCP 的 `enabled_categories` 约束、
   MCP `undo` 三态、`--undo-last` 退出码、提权命令行转义与环境标记、
@@ -151,7 +170,7 @@
   （``display_width`` 剥离 ANSI + 非 TTY 不出色 + 开色后表格仍等宽），
   以及文档口径与实现一致性
   （分类数/规则数/版本号/README 表格/README 里的测试数自动对照 pytest 收集结果）。
-- 全套 **352 passed**（原 298 + 54）。
+- 全套 **357 passed**（原 298 + 59）。
 
 ## 0.9.9 (2026-09)
 

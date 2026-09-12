@@ -9,17 +9,23 @@ description = "为个人电脑定制的安全垃圾清理工具 (Windows 优先)
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "you" }]
-requires-python = ">=3.10"
-keywords = ["cleaner", "junk", "cache", "windows", "pc", "garbage", "maintenance"]
+# v0.9.10：**只支持 Python 3.12+**。
+# 原因：代码里使用 PEP 701 的 f-string 写法（``f"{dim(f'…')}"`` —— 内层 f-string
+# 用与外层相同的引号），这在 3.10/3.11 上是**语法错误**，报错还是让人完全摸不着
+# 头脑的 "unterminated string literal"。与其在旧解释器上崩栈，不如把要求写清楚：
+# 安装阶段 pip 直接拒绝，启动阶段 ``_launcher.py`` / ``__main__.py`` 给中文提示。
+requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
     "Topic :: System :: Systems Administration",
     "Topic :: Utilities",
 ]
+keywords = ["cleaner", "junk", "cache", "windows", "pc", "garbage", "maintenance"]
 
 # v0.9.3：send2trash 改为**必需依赖**。
 # 此前它是可选 extra，未安装时工具会静默降级为永久删除，

@@ -597,14 +597,26 @@ def _elevated_command_line(argv: list[str], python: str, launcher: str) -> str:
 
 
 def _relaunch_as_admin(argv: list[str]) -> int:
-    """通过 UAC 以管理员身份重新启动（Windows）。
+    """通过 UAC 以管理员身份重新启动（仅 Windows）。
 
     安全增强：
     - 提权后的进程带 ``PC_CLEANER_ELEVATED=1``（经 ``cmd /c set`` 注入，
       不依赖环境变量继承），``ui.is_elevated()`` 因此能正确识别；
     - 移除 ``--admin`` 参数，防止无限循环；
     - 所有参数逐个转义（v0.9.10），带空格的路径不再被拆散。
+
+    v0.9.10 跨平台修复：**先判平台**。``ctypes`` 在 POSIX 上**没有** ``windll``
+    属性，而 ``cli.main`` 只在 ``--admin and not is_admin()`` 时才调用本函数，
+    在 Linux/macOS 上 ``is_admin()`` 恒为 False —— 于是
+    ``python -m pc_cleaner --admin`` 会直接抛 ``AttributeError: module 'ctypes'
+    has no attribute 'windll'``。README 明确说"Windows 之外平台可运行"，所以这里
+    给出可读提示并返回错误码，而不是崩栈。
     """
+    if sys.platform != "win32":
+        _echo(yellow("--admin 提权重启仅在 Windows 上可用（UAC）。"))
+        _echo("  本机不是 Windows：请直接用系统包管理器以管理员身份运行本工具。")
+        return 1
+
     import ctypes
 
     # 移除 --admin 避免死循环

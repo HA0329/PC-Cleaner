@@ -365,6 +365,23 @@ class TestElevationCommandLine:
         monkeypatch.delenv(commands.ELEVATED_ENV_VAR, raising=False)
         assert ui.is_elevated() is False
 
+    def test_relaunch_is_refused_on_non_windows(self, monkeypatch, capsys):
+        """POSIX 上 ctypes 没有 windll —— 必须先判平台，而不是崩 AttributeError。"""
+        monkeypatch.setattr(commands.sys, "platform", "linux")
+        code = commands._relaunch_as_admin(["--admin", "--list"])
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "Windows" in out
+
+    def test_admin_flag_does_not_crash_on_posix(self, monkeypatch, capsys):
+        """端到端：`--admin` 在 POSIX 上走不到 ctypes.windll（回归守卫）。"""
+        monkeypatch.setattr(commands.sys, "platform", "linux")
+        monkeypatch.setattr(cli, "is_admin", lambda: False)
+        code = cli.main(["--admin", "--list"])
+        captured = capsys.readouterr()
+        assert code == 1, captured.out + captured.err
+        assert "AttributeError" not in (captured.out + captured.err)
+
 
 # ===========================================================================
 # 7. recycle_bin 矛盾输入

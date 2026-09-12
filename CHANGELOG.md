@@ -6,7 +6,7 @@
 > 两条主线：①"承诺与实现不一致"的地方全部对齐（README 说不会静默降级，代码其实会；
 > 配置说禁用了某分类，Agent 其实照样能删）；②报数与退出码如实
 > （删了多少、释放了多少、恢复到什么程度，都必须能对上）。
-> 全部修复都配了回归测试，测试数 298 → 347（含 49 个新守门用例）。
+> 全部修复都配了回归测试，测试数 298 → 349（含 51 个新守门用例）。
 
 ### 安全修复（重要）
 
@@ -87,6 +87,13 @@
   工具自己的校验器都会警告"指向用户数据目录却标 safe"。现拆出独立分类
   `rdp_legacy_cache`（`risk=moderate`，需显式选择），29 → 30 个分类，
   目标数仍为 276。
+- **`--admin` 在非 Windows 上会崩栈**（`commands._relaunch_as_admin`）：该函数直接
+  使用 `ctypes.windll.shell32.ShellExecuteW`，而 POSIX 的 `ctypes` **没有 `windll`
+  属性**；`cli.main` 的调用条件是 `--admin and not is_admin()`，在 Linux/macOS 上
+  `is_admin()` 恒为 False —— 于是 `python -m pc_cleaner --admin` 会抛
+  `AttributeError: module 'ctypes' has no attribute 'windll'`。README 明确承诺
+  "Windows 之外平台可运行"，现在先判平台并给出可读提示（返回 1），并补了
+  `--admin` 的端到端回归测试。
 
 ### 文档与仓库
 
@@ -101,14 +108,14 @@
 
 ### 测试
 
-- 新增 `tests/test_v0910_fixes.py`（49 个用例）：回收站不可用时的整批拒绝（文件与
+- 新增 `tests/test_v0910_fixes.py`（51 个用例）：回收站不可用时的整批拒绝（文件与
   清空目录两条路径）、`vanished` 不计入 `deleted`/`freed`、`freed` 实测差、
   recycle_bin 矛盾输入（CLI + `--json`）、MCP 的 `enabled_categories` 约束、
   MCP `undo` 三态、`--undo-last` 退出码、提权命令行转义与环境标记、
-  `.bat` 参数引号（真的跑一遍 cmd 解析循环）、glob 起点目录匹配、
-  审计多候选路径与按 pattern 分组，以及文档口径与实现一致性（分类数/规则数/
-  版本号/README 表格/README 里的测试数自动对照 pytest 收集结果）。
-- 全套 **347 passed**（原 298 + 49）。
+  `--admin` 在 POSIX 上不崩栈、`.bat` 参数引号（真的跑一遍 cmd 解析循环）、
+  glob 起点目录匹配、审计多候选路径与按 pattern 分组，以及文档口径与实现一致性
+  （分类数/规则数/版本号/README 表格/README 里的测试数自动对照 pytest 收集结果）。
+- 全套 **349 passed**（原 298 + 51）。
 
 ## 0.9.9 (2026-09)
 

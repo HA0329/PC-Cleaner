@@ -1,14 +1,17 @@
 name: CI
 
+# 触发：任意分支推送、PR、以及手动触发（workflow_dispatch 便于在 fork / 分支上手动验证）
 on:
   push:
   pull_request:
   workflow_dispatch:
 
+# 同一分支上的旧运行直接取消，避免矩阵任务排队堆积
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# CI 只需要读代码（测试不写仓库），最小权限
 permissions:
   contents: read
 
@@ -18,15 +21,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
+      # 一个组合失败不要拖累其它组合，先把所有平台的结果都拿到
       fail-fast: false
       matrix:
-        # 最小改动：先只留 3.12 两格。绿了之后再逐行加回 3.10 / 3.13。
         os: [windows-latest, ubuntu-latest]
-        python-version: ["3.12"]
+        python-version: ["3.10", "3.12", "3.13"]
     defaults:
       run:
+        # 两个平台统一用 bash：Windows 运行器自带 Git Bash，且 `>` 重定向按字节写入，
+        # 避免不同 PowerShell 版本写出 UTF-16 / BOM 让 JSON 解析失败。
         shell: bash
     env:
+      # 强制子进程 stdout/stderr 为 UTF-8：--json / --health --json 输出含中文，
+      # 英文 Windows 运行器的默认代码页是 cp1252，不设的话重定向可能编码失败。
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
     steps:
@@ -41,22 +48,76 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
+      # send2trash 是必需依赖（pyproject.toml 已声明），Linux 上同样能装
       - name: Install project with dev extras
         run: pip install -e ".[dev]"
 
       - name: Byte-compile package
         run: python -m compileall -q pc_cleaner
 
+      # 本项目 Windows 优先：Linux 上部分用例由 pytest.mark.skipif 跳过（预期行为）
+      #
+      # v0.9.10：测试输出同时落盘，失败时自动补打"失败用例 + 报错摘要 + 环境信息"。
+      # 起因：一次 push 后 ubuntu 矩阵任务 16 秒失败，而 GitHub 只显示
+      # "Failing after 16s"，任何一步的报错都看不到，排查成本极高。
+      # 现在失败时日志里会直接出现 `--- 失败详情 ---` 段落。
       - name: Run tests
-        run: python -m pytest -q
+        id: pytest
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q 2>&1 | tee pytest.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::group::--- 失败详情（pytest.log 摘要） ---"
+            grep -nE "^(FAILED|ERROR)" pytest.log | head -50 || true
+            echo "---------- 尾部 80 行 ----------"
+            tail -n 80 pytest.log || true
+            echo "::endgroup::"
+            echo "::group::--- 环境信息（Linux/Windows 差异排查用） ---"
+            python -VV || true
+            python -c "import sys,os,tempfile,platform;print('sys.platform:',sys.platform);print('os.name:',os.name,'| sep:',repr(os.sep));print('tempdir:',tempfile.gettempdir());print('platform:',platform.platform())" || true
+            python -m pip --version || true
+            python -m pip list 2>/dev/null | grep -iE "send2trash|pytest|pip|setuptools" || true
+            echo "::endgroup::"
+          fi
+          exit "$status"
 
+      # 下面几步是"信号"而不是"闸门"：任何一步失败都要继续跑完，
+      # 否则第一步失败会把后面的诊断信息全部吞掉（用 --force-exit 在最后统一判定）。
       - name: Version smoke test
+        continue-on-error: true
         run: python -m pc_cleaner --version
 
       - name: Validate rules.json
+        continue-on-error: true
         run: python -m pc_cleaner --validate-rules
 
       - name: Health JSON contract smoke test
+        id: health_smoke
+        continue-on-error: true
+        # 把 --health --json 的 stdout 重定向到文件，并断言是合法 JSON
+        # （且带完整信封字段与非空的 health.items）
         run: |
           python -m pc_cleaner --health --json > health.json
-          python -c "import json,pathlib;d=json.loads(pathlib.Path('health.json').read_text(encoding='utf-8'));assert isinstance(d,dict);assert all(k in d for k in ('schema_version','ok','status','exit_code','health'));items=d['health']['items'];assert isinstance(items,list) and items;print('health json ok: status=%s items=%d' % (d['status'],len(items)))"
+          python -c "import json,pathlib;d=json.loads(pathlib.Path('health.json').read_text(encoding='utf-8'));assert isinstance(d,dict),'health.json 顶层必须是 JSON 对象';assert all(k in d for k in ('schema_version','ok','status','exit_code','health')),'信封字段缺失';items=d['health']['items'];assert isinstance(items,list) and items,'health.items 必须是非空列表';print('health json ok: status=%s items=%d' % (d['status'],len(items)))"
+
+      - name: Continue-on-error 步骤的最终判定
+        # 汇总上面几步（以及测试）的结果：任何一步失败，本任务整体失败。
+        # 这样既能拿到全部诊断输出，又不会把"失败"悄悄变成"通过"。
+        run: |
+          echo "pytest=${{ steps.pytest.outcome }} health_smoke=${{ steps.health_smoke.outcome }}"
+          if [ "${{ steps.pytest.outcome }}" != "success" ] || \
+             [ "${{ steps.health_smoke.outcome }}" != "success" ]; then
+            echo "::error::CI 有步骤失败（详见上面各步骤输出）"
+            exit 1
+          fi
+
+      - name: 上传 pytest 日志（便于事后排查，失败也上传）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: pytest.log
+          if-no-files-found: ignore
+

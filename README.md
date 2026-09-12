@@ -11,14 +11,22 @@ python -m pc_cleaner --list      # 先看能清多少（不删任何东西）
 python -m pc_cleaner             # 进入交互式菜单
 ```
 
-**当前版本 0.9.8**（版本演进与每处修改的来龙去脉见 [CHANGELOG.md](CHANGELOG.md)）。
+**当前版本 0.9.10**（版本演进与每处修改的来龙去脉见 [CHANGELOG.md](CHANGELOG.md)）。
 
 ---
 
 ## ✨ 功能特性
 
-- 🗂 **分类清理**：27 个分类、271 条内置规则（含 51 条 `--deep` 深度规则），覆盖系统临时文件、
-  GPU 着色器缓存、浏览器缓存、微信 4.x 运行缓存、游戏平台、开发工具、系统日志，以及管理员深度清理。
+- 🗂 **分类清理**：30 个分类、276 条内置规则（含 51 条 `--deep` 深度规则），覆盖系统临时文件、
+  GPU 着色器缓存、浏览器缓存、微信 4.x 运行缓存、游戏平台、开发工具、系统日志、
+  **失效快捷方式**、**使用痕迹**，以及管理员深度清理。
+- 🔗 **失效快捷方式清理**（v0.9.9）：纯 Python 解析 `.lnk`（不依赖 COM），只清
+  "目标所在卷可访问但目标确实不存在"的死链；离线盘、移动盘、网络共享、URL 与
+  系统命名空间（文件资源管理器/回收站）一律不动，`Startup` 开机启动目录默认排除。
+- 🧹 **使用痕迹清理**（v0.9.9）：最近打开的文档、跳转列表缓存、PowerShell 命令历史
+  （不删用户文件，清空后系统自动重建）。
+- 🩺 **注册表垃圾只读扫描**（v0.9.9）：`--registry-scan` 列出失效卸载表项 /
+  MuiCache 孤儿缓存 / 失效 App Paths，**只报告不删除**（见下方"关于注册表"）。
 - 🔍 **先预览后确认**：扫描 → 展示体积与文件列表（按体积降序）→ 人工确认 → 执行。
 - ♻️ **默认可回收**：删除进回收站（`send2trash` 为必需依赖，不静默降级为永久删除）；
   `--undo-last` 或菜单 `u` 键可恢复最近一次。
@@ -33,7 +41,7 @@ python -m pc_cleaner             # 进入交互式菜单
 
 ---
 
-## 🗂 内置清理分类（27 个）
+## 🗂 内置清理分类（30 个）
 
 | 分类 key | 名称 | 风险 | 清理内容 |
 | --- | --- | --- | --- |
@@ -62,8 +70,19 @@ python -m pc_cleaner             # 进入交互式菜单
 | `recycle_and_diagnostics` | 诊断日志(ETL) | 🟡 | ETL 诊断日志、WinSAT 缓存（需管理员） |
 | `cloud_app_hidden` | 云盘与商店应用缓存 | 🟢 | OneDrive 缓存、Windows Store 应用临时文件 |
 | `java_rdp_legacy` | Java/远程桌面/字体缓存 | 🟢 | Java 部署缓存、远程桌面位图缓存、系统字体缓存 |
+| `rdp_legacy_cache` | 远程桌面旧版缓存(用户文档) | 🟡 | `文档\Remote Desktop\Cache` 里的剪贴板/位图缓存（v0.9.10 从 `java_rdp_legacy` 拆出：可重建，但物理上位于用户文档目录内，故不放进 `--all`） |
 | `crash_telemetry` | 崩溃上报与遥测 | 🟢 | WER 错误报告归档/队列、遥测存储 |
 | `extreme_stealth` | 变态级隐蔽缓存 | 🟡 | CBS 历史日志、大体积事件日志、Steam/Epic 下载残留、音视频客户端缓存 |
+| `broken_shortcuts` | 失效快捷方式 | 🔴 | 开始菜单/桌面/快速启动栏中目标已被卸载的死链（离线盘、移动盘、网络共享、URL、系统命名空间不动，`Startup` 排除） |
+| `usage_traces` | 使用痕迹 | 🟡 | 最近打开的文档、跳转列表缓存、PowerShell 命令历史（不删用户文件） |
+
+> 🔗 `broken_shortcuts` 的判定分四档：`ok`（目标存在）/ `broken`（卷可访问但目标不存在，
+> **只有这一档会被清理**）/ `unavailable`（离线盘、未插移动盘、断开的共享 —— 插上盘还能用）/
+> `unknown` 与 `invalid`（URL、系统命名空间、0 字节 UWP 占位符）。判定细节见
+> [SECURITY.md 的设计边界](SECURITY.md#明确的设计边界不是漏洞)。
+>
+> 🧹 `usage_traces` 属隐私与桌面整洁范畴，**允许**打进 `--all`；`browser_privacy` /
+> `browser_data` 才是会退出登录的高风险项。
 
 > 🗑 `recycle_bin`（回收站）不在 `rules.json` 中，属引擎特殊处理项：
 > 用 `--clean recycle_bin`、菜单 `r`，或配置 `all_includes_recycle_bin` 让 `--all` 带上它。
@@ -75,6 +94,8 @@ python -m pc_cleaner             # 进入交互式菜单
 1. **不确认不删**：所有删除都要人工确认（`--yes` 除外，谨慎使用）；非交互环境下遇到危险操作会被**明确拒绝**。
 2. **回收站优先**：默认进回收站；`send2trash` 是必需依赖，**不再静默降级为永久删除**。
    进回收站失败时**默认保留原文件**（`recycle_error_fallback` 可改为回退永久删除，默认关闭）。
+   回收站不可用时（未安装/导入失败）**整批拒绝执行并报错，一个文件都不删** ——
+   `--recycle` 会在启动阶段就返回退出码 1，引擎层同样拒绝，绝不会"以为进了回收站、其实永久删除"。
 3. **风险分级**：高风险分类默认隐藏，`--all` 不选中；永久删除、清空回收站、含高风险分类的
    操作在非交互场景下**必须显式 `--risky` 授权**，否则返回 `needs_confirmation` + 退出码 4，**什么都不删**。
    交互式确认要求完整输入 `yes`（单个 `y` 无效）。
@@ -89,7 +110,8 @@ python -m pc_cleaner             # 进入交互式菜单
    与受保护路径，即使扫描器漏判也删不掉。
 8. **跳过危险结构**：不跟随符号链接与 junction，拒绝删除链接自身，清空目标本身是链接时也拒绝。
 9. **逐项容错 + 如实上报**：单个文件被占用/无权限时跳过并继续；部分失败计入 `skipped`，一个都没清掉算失败。
-10. **释放量如实**：永久删除按删除前后体积差算 `freed`；进回收站的字节只计 `recycled`
+   扫描之后、删除之前就已被外部删掉的目标计入 `vanished`（**不算** `deleted`，也不谎报释放量）。
+10. **释放量如实**：永久删除按**删除前后实测体积差**算 `freed`；进回收站的字节只计 `recycled`
     （清空回收站才真正释放），不混进 `freed` 虚报。
 11. **审计留痕**：每次清理写入 `history.json`（原子写 + 跨进程锁）与 `audit.log`；**Ctrl+C 也会落盘**。
 
@@ -101,6 +123,14 @@ python -m pc_cleaner             # 进入交互式菜单
 >
 > 📌 组件库（WinSxS / DriverStore / `Windows\Installer` / 卷影副本）**只报告不删除**，
 > `--checkup` 会给出官方清理命令（DISM / pnputil / vssadmin）。这些路径已在保护黑名单中。
+>
+> 📌 **关于注册表**：火绒一类工具提供"注册表垃圾清理"，本工具**只做只读扫描**
+> （`--registry-scan`），**不提供任何删除入口**。原因：删注册表项**不释放磁盘空间**，
+> 而"这条记录还有没有用"无法可靠判定，误删会让软件甚至系统出问题。实测也印证了这点 ——
+> 本项目实现该扫描时，最初用"压缩产品码匹配"判定 MSI 残留，结果把 41 条 MSI 表项
+> **全部误报**（里面是仍在使用的 VC++/Node.js/Java 运行时）；改为调用 Windows Installer
+> API（`MsiQueryProductStateW`）做权威判定后，拿不到结论就**不报**。要动手请自行用
+> `regedit` 核对，并先 `reg export <路径> backup.reg` 备份。
 
 ---
 
@@ -109,7 +139,8 @@ python -m pc_cleaner             # 进入交互式菜单
 要求：Python 3.10+（推荐 3.12）。
 
 > ⚠️ `python -m pc_cleaner` 必须在**项目根目录**（含 `pc_cleaner/`、`pyproject.toml` 的那层）运行，
-> 不要进入 `pc_cleaner/` 子目录。
+> 不要进入 `pc_cleaner/` 子目录。测试同理：在项目根目录执行 `pytest`（在别的目录跑会因
+> 找不到 `pc_cleaner` 包而整批 collection error）。
 
 ```bash
 pip install -e .                          # send2trash 随包安装，删除默认进回收站
@@ -120,7 +151,8 @@ python -m pc_cleaner --checkup            # 一键体检（管理员/磁盘/回�
 python -m pc_cleaner --clean system_temp  # 清理指定分类（会先预览再确认）
 ```
 
-**Windows 双击**：`pc_cleaner.bat`（加 `--no-pause` 可让窗口结束时自动关闭）。
+**Windows 双击**：`pc_cleaner.bat`（加 `--no-pause` 可让窗口结束时自动关闭；
+带空格的参数请用引号，例如 `pc_cleaner.bat --export-scan "D:\My Dir\scan.json"`）。
 
 **便携运行，不写用户目录**：用 `PC_CLEANER_HOME` 把配置/历史/审计重定向到别处：
 
@@ -137,7 +169,7 @@ python -m pc_cleaner --checkup
 | --- | --- |
 | `--list` / `-l` | 仅扫描，列出各分类占用、磁盘可用、回收站占用 |
 | `--detail` / `-d`、`--tree` | 详细 / 树形展示扫描结果 |
-| `--deep` / `-D` | 深度扫描：更大遍历深度 + 启用 `deep_only` 规则 |
+| `--deep` / `-D` | 深度扫描：启用 `deep_only` 规则，并把遍历深度提升到至少 50 层（除非显式给了 `--max-depth`） |
 | `--workers N` | 并行扫描线程数（1=串行，0=按 CPU 自动，默认 4） |
 | `--clean 分类` | 清理指定分类（逗号分隔）；**分类名拼错 → 退出码 1** |
 | `--all` / `--exclude 分类` | 选中全部非高风险分类 / 排除某些分类 |
@@ -148,6 +180,7 @@ python -m pc_cleaner --checkup
 | `--ext` / `--min-size-mb` / `--older-than-days` | 按扩展名 / 最小体积 / 最旧修改时间过滤 |
 | `--shred` | 永久删除前随机覆写内容（隐私增强，`--shred-passes N` 控制遍数） |
 | `--health` | **只读体检（16 项）**；有 `error` 项时退出码 1，可配 `--json`、`--lang` |
+| `--registry-scan` | 注册表垃圾**只读扫描**（失效卸载表项 / MuiCache 孤儿 / 失效 App Paths）；**绝不删除注册表项** |
 | `--checkup` | 清理前准备情况 + 本机环境适配 + 组件库体积 |
 | `--history` / `--undo-last` | 查看清理历史 / 从回收站恢复最近一次 |
 | `--json` / `--json-schema` | JSON 输出（带退出码契约）/ 输出契约的 JSON Schema |
@@ -156,7 +189,6 @@ python -m pc_cleaner --checkup
 | `--show-rules` / `--validate-rules` | 展示内置规则 / 校验规则格式与告警 |
 | `--audit-rules` | 配合 `--validate-rules`：列出**在本机匹配不到任何内容**的规则 |
 | `--admin` | UAC 提权重启（系统深度清理需要） |
-
 完整参数（`--sort`、`--max-depth`、`--export-scan`、`--no-progress`、`--lang`、
 `--recycle-fallback`、`--shred-passes` 等）见 `python -m pc_cleaner --help`。
 
@@ -169,6 +201,9 @@ python -m pc_cleaner --all --exclude downloads --recycle             # 清所有
 python -m pc_cleaner --clean recycle_bin                             # 清空回收站（会二次确认）
 python -m pc_cleaner --clean database_compact                        # 压缩浏览器数据库（不删数据）
 python -m pc_cleaner --clean system_logs --recycle --admin           # 系统日志（UAC 提权）
+python -m pc_cleaner --clean broken_shortcuts --risky --recycle      # 清失效快捷方式（高风险，需显式选择）
+python -m pc_cleaner --clean usage_traces --recycle                  # 清使用痕迹（最近文档/跳转列表/命令历史）
+python -m pc_cleaner --registry-scan                                 # 注册表垃圾只读扫描（不删任何东西）
 python -m pc_cleaner --json --clean downloads --yes --risky          # 自动化：显式授权才执行
 python -m pc_cleaner --undo-last                                     # 恢复最近一次清理
 python -m pc_cleaner --validate-rules --audit-rules                  # 查规则在本机是否还有效
@@ -193,7 +228,8 @@ python -m pc_cleaner --validate-rules --audit-rules                  # 查规则
 
 `--json` 顶层固定为 `{schema_version, ok, status, exit_code, categories, action}`。
 `action` 含 `deleted`、`failed`、`skipped`（部分清理的目标数）、`skipped_in_use`、
-`freed_bytes`、**`recycled_bytes`**（进回收站的字节，清空回收站后才真正释放）。
+`vanished`（扫描后已不存在、未执行删除的目标数）、`freed_bytes`、
+**`recycled_bytes`**（进回收站的字节，清空回收站后才真正释放）。
 「什么都没执行」用 **`action.not_executed: true`**。
 
 **典型自动化流程**：`--json --dry-run` 预览 → 确认 → `--json --clean <分类> --yes`
@@ -216,9 +252,12 @@ python -m pc_cleaner --mcp --mcp-allow-delete    # 额外暴露 delete / undo（
 | 机制 | 说明 |
 | --- | --- |
 | **默认只读** | 未加 `--mcp-allow-delete` 时工具表里没有 `delete`/`undo`，直接调用也会被拒绝 |
+| **遵守本机配置** | 配置 `enabled_categories` 里被关掉的分类，Agent 既不能预览也不能删除（v0.9.10） |
 | **两阶段确认** | `preview_delete` 返回清单 + `confirm_token`（600 秒、一次性、绑定清单指纹） |
 | **漂移检测** | `delete` 会重扫比对，出现未预览过的新目标且超阈值 → 拒绝执行；**永远只删预览过的路径** |
 | **危险二次授权** | 清单含高风险分类 / 永久删除 / 清空回收站时须带 `acknowledge_danger=true` |
+| **留痕可撤销** | `delete` 写 `history.json` + `audit.log`，删掉的东西可用 `undo` 找回；`undo` 会**如实上报**：一条都没恢复时返回 `ok:false / status:"failed"`，部分恢复返回 `status:"partial"`（v0.9.10） |
+| **注册表只读** | `registry_scan` 只报告不修改；MCP 层不存在任何注册表清理工具 |
 
 客户端配置示例与完整工具参数见 [docs/mcp.md](docs/mcp.md)。
 建议先用只读模式观察 Agent 行为，再按需放开写能力。
@@ -299,7 +338,9 @@ pc_cleaner/
 ├── menu.py                # 交互式菜单、预览与清理流程
 ├── scanner.py             # 安全扫描与体积计算（并行、去重、剪枝）
 ├── engine.py              # 删除引擎（回收站/永久、二次防御、shred、恢复、VACUUM）
-├── rules.py / rules.json  # 规则加载、黑名单/白名单、风险分级、校验（27 分类 271 目标）
+├── rules.py / rules.json  # 规则加载、黑名单/白名单、风险分级、校验（30 分类 276 目标）
+├── lnk.py                 # Windows 快捷方式(.lnk)解析 —— 纯 Python，无 COM（v0.9.9）
+├── registry.py            # 注册表垃圾**只读**扫描（绝不删除，v0.9.9）
 ├── health.py / env.py     # 只读体检（16 项）/ 运行环境探测
 ├── mcp.py / service.py    # MCP 服务端 / 退出码契约与 JSON 信封
 ├── history.py             # 清理历史与审计日志（原子写 + 跨进程锁）
@@ -307,7 +348,7 @@ pc_cleaner/
 ├── ui.py / console.py     # 输出、确认、进度 / ANSI 颜色与 CJK 对齐
 ├── proc.py / config.py    # 进程占用检测 / 配置读写
 docs/                      # mcp.md、json-contract.md
-tests/                     # 258 个单元测试
+tests/                     # 347 个单元测试
 ```
 
 ---
@@ -316,7 +357,7 @@ tests/                     # 258 个单元测试
 
 ```bash
 pip install -e ".[dev]"
-pytest        # 258 passed
+pytest        # 347 passed（须在项目根目录运行，见上方提示）
 ```
 
 CI 在 **Windows + Linux × Python 3.10/3.12/3.13** 矩阵上跑同一套

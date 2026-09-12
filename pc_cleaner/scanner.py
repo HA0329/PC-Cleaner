@@ -32,15 +32,24 @@ v0.9.2 改进：
   ``glob_files`` / ``files_by_rule`` 支持 ``ext`` 扩展名过滤。
 - 新增并行扫描 ``scan_all(workers=N)``：目录遍历 I/O 密集，多线程显著提速，
   结果顺序仍与规则顺序一致。
+
+v0.9.10 修复：
+- **glob 不产出起点目录**（``base.glob()`` / ``rglob()`` 都跳过 base 自身），
+  当 base 自己就符合 pattern（典型：``base="%WINDIR%/System32/winevt/Logs"`` +
+  ``pattern="*"``，意图是"清空该目录里的子目录"）时整条规则静默空转；
+  在 POSIX 上还叠加反斜杠/``os.sep`` 差异，同一规则在 Windows 可用、
+  Linux/macOS 全失配。现在先用 :func:`_pattern_matches_dir` 判定 base 自身，
+  再与 glob 结果合并（``glob_dirs`` / ``glob_files`` 均已覆盖）。
 """
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import sys
 import time
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from .models import CategoryResult, Target, TargetAction, TargetKind, format_size  # noqa: F401
@@ -474,14 +483,57 @@ def _dir_size(
 # ===========================================================================
 # 公共过滤函数（消除重复）
 # ===========================================================================
-def _safe_glob(base: Path, pattern: str) -> Iterator[Path]:
+def _pattern_matches_dir(base: Path, candidate: Path, pattern: str) -> bool:
+    """``candidate`` 自身（相对 ``base``）是否匹配 glob ``pattern``（v0.9.10）。
+
+    ``Path.glob`` / ``Path.rglob`` **永远不包含起点目录自身**（``base.rglob("*")``
+    不会产出 ``base``），因此当 base 本身就符合规则（例如规则写
+    ``base="%WINDIR%/System32/winevt/Logs"``、``pattern="*"``，意图就是清空该
+    目录里的所有子目录）时，这条规则会在**每一个平台**上都静默空转；
+    在 POSIX 上又因为 Windows 风格反斜杠与 ``os.sep`` 归一化的差异，
+    相同规则在 Windows 上"看起来还好"、到 Linux/macOS 上匹配全失
+    （``--audit-rules`` 里"目录存在但匹配不到内容"大量出自这一类）。
+
+    判定口径与 ``Path.glob`` 对齐：先把候选相对 base 的路径拆成组件，比对
+    模式的最右段；模式不含分隔符时只比最后一层（``*`` 匹配任意目录名），
+    含分隔符时要求**尾部连续组件**全等（``Default/*`` 可匹配
+    ``Default/Cache``，但不会匹配 ``x/Default/Cache`` 之外的东西）。
+    """
+    if not pattern:
+        return False
+    if normalize(candidate) == normalize(base):
+        # 起点自身：相对路径是 "."，按目录/文件名本身比对
+        rel_name = candidate.name
+        rel_parts: list[str] = []
+    else:
+        rel = PurePosixPath(*candidate.relative_to(base).parts)
+        rel_name = rel.name
+        rel_parts = list(rel.parts)
+    pat = pattern.replace("\\", "/")
+    if pat.lower() == rel_name.lower() or fnmatch.fnmatch(rel_name.lower(), pat.lower()):
+        return True
+    if "/" not in pat:
+        return False
+    pat_parts = [p for p in pat.split("/") if p not in ("", ".")]
+    if len(pat_parts) > len(rel_parts):
+        return False
+    tail = rel_parts[len(rel_parts) - len(pat_parts):]
+    return all(
+        fnmatch.fnmatch(c.lower(), p.lower()) for c, p in zip(tail, pat_parts)
+    )
+
+
+def _safe_glob(base: Path, pattern: str, *, recursive: bool = False) -> Iterator[Path]:
     """惰性遍历 glob 结果，单个条目出错不影响整条规则（v0.9.3）。
 
     此前 ``base.glob(...)`` 的**迭代**不在任何 try 内，一个 OSError 会让整条
     规则的结果作废（用户看到"这条规则没东西可清"，而非"部分条目读不到"）。
+
+    ``recursive=True``（v0.9.9）：用 ``rglob`` 递归匹配 —— 开始菜单 / 桌面等
+    目录是**多层结构**，单层 glob 会漏掉大多数目标。
     """
     try:
-        it = base.glob(pattern)
+        it = base.rglob(pattern) if recursive else base.glob(pattern)
     except (OSError, ValueError):
         return
     while True:
@@ -732,7 +784,17 @@ def _scan_glob_dirs(
     for base in bases:
         if not base.exists():
             continue
-        for m in _safe_glob(base, pattern):
+        # v0.9.10：glob 不会产出起点目录自身，若 base 自己就匹配 pattern
+        # （如 pattern="*" 且意图是清空该目录下的所有层），先补上 base 本身，
+        # 否则这条规则会在所有平台上静默空转。
+        candidates: list[Path] = []
+        try:
+            if _pattern_matches_dir(base, base, pattern):
+                candidates.append(base)
+        except (OSError, ValueError):
+            pass
+        candidates.extend(_safe_glob(base, pattern))
+        for m in candidates:
             try:
                 if is_reparse_point(m) or not m.is_dir():
                     continue
@@ -783,8 +845,18 @@ def _scan_glob_files(
 
     # 复用公共过滤函数：传入生成器，惰性过滤
     # （_safe_glob 保证单个条目 OSError 不会让整条规则的结果作废）
+    # v0.9.10：base 自身若匹配 pattern 也要参与（glob 不产出起点目录，
+    # 例如规则 base=<某个 .db 文件> + pattern="*.db"）；
+    # _filter_and_build_file_targets 里有 is_file() 正向过滤，
+    # 目录不会被误当成文件清理。
+    extra: list[Path] = []
+    try:
+        if base.is_file() and _pattern_matches_dir(base, base, pattern):
+            extra.append(base)
+    except OSError:
+        pass
     return _filter_and_build_file_targets(
-        (m for m in _safe_glob(base, pattern) if _is_file_safe(m)),
+        (m for m in [*extra, *_safe_glob(base, pattern)] if _is_file_safe(m)),
         category_key,
         is_protected,
         min_size_bytes=min_size_bytes,
@@ -917,8 +989,6 @@ def _scan_files_by_rule(
     )
     if pattern:
         # 额外按通配符过滤（如 base 下只需 *.log）：用 fnmatch 匹配文件名
-        import fnmatch
-
         targets = [t for t in targets if fnmatch.fnmatch(t.path.name.lower(), pattern.lower())]
     return targets
 
@@ -1058,6 +1128,109 @@ def _sqlite_reclaimable(path: Path) -> int:
         return 0
 
 
+def _scan_broken_shortcuts(
+    spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
+) -> list[Target]:
+    """扫描**失效快捷方式**（``.lnk`` 目标已不存在）——只产出确定失效的那些。
+
+    对应火绒「快捷方式」清理项：清理卸载软件后残留的死链。
+
+    安全设计（与 :mod:`pc_cleaner.lnk` 的分级判定配套）：
+
+    - 只有 ``V_BROKEN``（**目标所在卷可访问、但目标确实不存在**）才作为可清理目标；
+    - ``V_UNAVAILABLE``（离线盘 / 未插移动盘 / 断开的共享）**不计入**，否则会把
+      "插上盘就能用"的快捷方式误删；
+    - ``V_UNKNOWN``（URL 指向、shell 命名空间如文件资源管理器/回收站）、
+      ``V_INVALID``（0 字节 UWP 占位符）同样不计入；
+    - ``include_unavailable: true`` 时才把不可用项也列为目标（默认关闭）。
+
+    ``exclude_dirs``：排除某些目录名（如 ``Startup``），避免动开机启动项。
+    ``bases``：候选根目录列表（用户开始菜单 / 公共开始菜单 / 桌面 / 快速启动）。
+    """
+    from .lnk import V_BROKEN, V_INVALID, V_UNAVAILABLE, V_UNKNOWN, classify, parse_shortcut
+
+    raw_bases: list[str] = []
+    if isinstance(spec.get("base"), str) and spec["base"]:
+        raw_bases.append(spec["base"])
+    extra = spec.get("bases")
+    if isinstance(extra, (list, tuple)):
+        raw_bases.extend(b for b in extra if isinstance(b, str) and b)
+    if not raw_bases:
+        return []
+
+    pattern = spec.get("pattern") or "*.lnk"
+    # 开始菜单 / 桌面 / 快速启动都是多层目录（如「开始菜单\Programs\System Tools\」），
+    # 默认递归匹配；显式 "recursive": false 可退回单层。
+    recursive = bool(spec.get("recursive", True))
+    include_unavailable = bool(spec.get("include_unavailable"))
+    exclude_dirs = {str(d).lower() for d in (spec.get("exclude_dirs") or [])}
+    label = spec.get("label", "")
+    skip_in_use = bool(spec.get("skip_if_in_use"))
+
+    bases: list[Path] = []
+    seen_bases: set[str] = set()
+    for rb in raw_bases:
+        try:
+            b = expand_path(rb)
+        except Exception:  # noqa: BLE001 单个候选展开失败不影响其它候选
+            continue
+        key = normalize(b)
+        if key not in seen_bases:
+            seen_bases.add(key)
+            bases.append(b)
+
+    targets: list[Target] = []
+    seen_targets: set[str] = set()
+    for base in bases:
+        if not base.exists() or not base.is_dir():
+            continue
+        for m in _safe_glob(base, pattern, recursive=recursive):
+            try:
+                if is_reparse_point(m) or not m.is_file():
+                    continue
+            except OSError:
+                continue
+            if is_protected(m):
+                continue
+            # 目录名排除（如 Startup 开机启动目录）
+            try:
+                rel_parts = m.relative_to(base).parts
+            except ValueError:
+                rel_parts = (m.name,)
+            if exclude_dirs and any(part.lower() in exclude_dirs for part in rel_parts[:-1]):
+                continue
+            tkey = normalize(m)
+            if tkey in seen_targets:
+                continue
+            try:
+                info = parse_shortcut(m)
+            except Exception:  # noqa: BLE001 单个文件解析异常不影响整批扫描
+                logger.debug("快捷方式解析异常: %s", m, exc_info=True)
+                continue
+            verdict, reason = classify(info)
+            keep = verdict == V_BROKEN or (include_unavailable and verdict == V_UNAVAILABLE)
+            if not keep:
+                continue
+            seen_targets.add(tkey)
+            try:
+                size = m.stat().st_size
+            except OSError:
+                size = 0
+            targets.append(
+                Target(
+                    path=m,
+                    kind=TargetKind.FILE,
+                    action=TargetAction.DELETE,
+                    category=category_key,
+                    size=size,
+                    file_count=1,
+                    label=f"{label}（{reason}）" if reason else label,
+                    skip_if_in_use=skip_in_use,
+                )
+            )
+    return targets
+
+
 def _scan_compact_db(
     spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
 ) -> list[Target]:
@@ -1112,6 +1285,7 @@ _TARGET_HANDLERS = {
     "glob_files": _scan_glob_files,
     "files_by_rule": _scan_files_by_rule,
     "compact_db": _scan_compact_db,
+    "broken_shortcuts": _scan_broken_shortcuts,
     "empty_dirs": _scan_empty_dirs,
     "zero_byte_files": _scan_zero_byte_files,
 }
@@ -1598,9 +1772,11 @@ def print_detail_report(
         print("")
 
     # 汇总
-    print(separator("═") if hasattr(separator, '__call__') else "=" * 60)
+    # v0.9.9：去掉 `separator("═") if hasattr(separator, '__call__') else "=" * 60`
+    # 这种写法 —— hasattr 恒为 True，三元表达式的 else 分支是永远走不到的死代码。
+    print(separator("═"))
     print(f"  {bold('合计')}：{total_targets} 个目标, {total_count} 个文件, 可释放 {green(format_size(total_size))}")
-    print(separator("═") if hasattr(separator, '__call__') else "=" * 60)
+    print(separator("═"))
 
 
 def print_tree_report(results: list[CategoryResult]) -> None:

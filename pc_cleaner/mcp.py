@@ -18,6 +18,11 @@
    不代替"你同意承担风险"）。
 5. **stdout 只承载协议**：所有人类可读输出走 stderr；本模块**绝不**调用 ``ui._echo``。
 6. **token 一次性**：用过即失效，且绑定清单内容哈希。
+7. **遵守本机配置**（v0.9.10）：``enabled_categories`` 里被用户关掉的分类，
+   Agent 既不能预览也不能删除（此前会绕过该配置）。
+8. **如实上报**（v0.9.10）：``undo`` 在"一条都没恢复"时返回
+   ``ok=false / status="failed"``，部分恢复返回 ``status="partial"``，
+   不再无论结果都报 ``restored``。
 
 协议实现是零依赖的（纯标准库），只处理 MCP 的 ``initialize`` / ``ping`` /
 ``tools/list`` / ``tools/call`` 与通知，未识别的方法返回 ``-32601``。
@@ -37,9 +42,14 @@ from typing import Any, Iterable, TextIO
 from . import __version__
 from .config import load_config
 from .engine import CleanMode, delete_targets, restore_paths
-from .history import load_history
+from .history import (
+    append_session,
+    load_history,
+    make_session,
+    record_deletion_audit,
+)
 from .models import Target, TargetAction, TargetKind, format_size
-from .rules import get_all_category_specs
+from .rules import get_all_category_specs, get_enabled_category_specs
 from .scanner import scan_all
 from .service import dangerous_reasons
 
@@ -58,8 +68,10 @@ _INSTRUCTIONS = (
     "PC-Cleaner 是 Windows 垃圾清理工具。安全流程：先调用 scan / preview_delete 查看清单，"
     "再决定是否用 confirm_token 执行 delete；preview_delete 不会删除任何东西。"
     "若清单含高风险分类/永久删除/清空回收站，delete 还需 acknowledge_danger=true。"
+    "注册表相关只能用 registry_scan 查看（只读，本工具不清理注册表）。"
     "English: call scan/preview_delete first (read-only), then delete(confirm_token) to execute. "
-    "Destructive manifests require acknowledge_danger=true."
+    "Destructive manifests require acknowledge_danger=true. "
+    "registry_scan is read-only and never modifies the registry."
 )
 
 
@@ -115,13 +127,31 @@ def _scan_depth() -> int:
 
 
 def _scan_categories(categories: Iterable[str], deep: bool):
-    """扫描指定分类，返回 ``(results, 未知分类列表)``。"""
+    """扫描指定分类，返回 ``(results, 未知分类列表)``。
+
+    v0.9.10 安全修复：这里改用 :func:`get_enabled_category_specs`（与 CLI 一致），
+    因此配置里的 ``enabled_categories`` 对 Agent 同样生效。此前用的是
+    ``get_all_category_specs``，导致**用户在配置里显式关掉的分类，Agent 仍能
+    ``preview_delete`` 并拿到 confirm_token 去删除**——配置约束形同虚设。
+    被 ``enabled_categories`` 过滤掉的分类现在按"不可用"报错，而不是静默变成
+    0 目标（静默会让 Agent 以为"这类没东西可清"，而真相是"用户不允许清"）。
+    """
     wanted = {str(c).strip().lower() for c in categories if str(c).strip()}
-    specs = get_all_category_specs(deep=deep)
+    specs = get_enabled_category_specs(deep=deep)
+    all_known = {
+        str(s.get("key", "")).lower() for s in get_all_category_specs(deep=deep)
+    }
     known = {str(s.get("key", "")).lower() for s in specs}
-    missing = sorted(wanted - known)
+    disabled = sorted(wanted & (all_known - known))
+    missing = sorted(wanted - all_known)
     picked = [s for s in specs if str(s.get("key", "")).lower() in wanted]
     results = scan_all(picked, scan_depth=_scan_depth(), workers=0)
+    if disabled:
+        raise _ToolError(
+            "以下分类已被本机配置 enabled_categories 禁用，服务端不会为它们"
+            f"提供清理能力：{', '.join(disabled)}"
+            "（如需开放请修改 config.json 的 enabled_categories 后重启服务端）"
+        )
     return results, missing
 
 
@@ -227,6 +257,21 @@ def _tool_health(_args: dict[str, Any], _deep_default: bool) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "health": report.to_dict(),
     }
+
+
+def _tool_registry_scan(_args: dict[str, Any], _deep_default: bool) -> dict[str, Any]:
+    """MCP 工具：注册表垃圾**只读**扫描（v0.9.9）。
+
+    刻意**只读**：不提供 registry_clean —— 删除注册表不释放磁盘空间，
+    且误删风险远大于收益（详见 :mod:`pc_cleaner.registry` 的设计说明）。
+    """
+    from .registry import scan_registry
+
+    report = scan_registry()
+    payload = report.to_dict()
+    payload["schema_version"] = SCHEMA_VERSION
+    payload["ok"] = bool(report.available)
+    return payload
 
 
 def _tool_history(args: dict[str, Any], _deep_default: bool) -> dict[str, Any]:
@@ -372,23 +417,57 @@ def _tool_delete(args: dict[str, Any], allow_delete: bool) -> dict[str, Any]:
     # 只删预览过的路径（大小取最新值）
     to_delete = [after[p] for p in before if p in after]
     mode = _mode_of(manifest.mode)
+    # v0.9.9 修复：MCP 删除此前**完全不写历史与审计日志**，导致经 MCP 删掉的文件
+    # 无法用 --undo-last / MCP undo 找回（undo 只读 history.json）——
+    # 与项目"审计留痕、Ctrl+C 也落盘、默认可撤销"的承诺不符。
+    # 现在与交互式流程（menu._run_clean_flow）保持一致：审计逐条记录 + 会话落盘。
+    cfg = load_config()
+    enable_history = bool(cfg.get("enable_history", True))
+
+    def _audit(path, size, mode_name, freed=0) -> None:
+        if enable_history:
+            record_deletion_audit(path, size, mode_name, freed)
+
     res = delete_targets(
         to_delete,
         mode,
-        recycle_fallback=bool(load_config().get("recycle_error_fallback", False)),
+        recycle_fallback=bool(cfg.get("recycle_error_fallback", False)),
+        audit=_audit,
     )
+    if enable_history and to_delete:
+        try:
+            append_session(
+                make_session(
+                    mode=manifest.mode,
+                    deleted=res["deleted"],
+                    failed=res["failed"],
+                    freed=res["freed"],
+                    categories=list(manifest.categories),
+                    targets=[
+                        {"path": str(t.path), "size": t.size, "action": t.action.value}
+                        for t in to_delete
+                    ],
+                    note="mcp",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 历史落盘失败不应影响删除结果上报
+            print(f"[pc-cleaner mcp] 历史落盘失败: {exc!r}", file=sys.stderr)
     return {
         "ok": res["failed"] == 0,
         "schema_version": SCHEMA_VERSION,
         "status": "deleted" if res["failed"] == 0 else "partial",
         "mode": manifest.mode,
         "manifest_digest": manifest.digest,
+        "history_recorded": bool(enable_history and to_delete),
         "vanished": len(missing),
+        # v0.9.10：扫描后、删除前消失的目标（无事可做）单独报出，不计入 deleted
+        "already_gone": res.get("vanished", 0),
         "result": {
             "deleted": res["deleted"],
             "failed": res["failed"],
             "skipped": res["skipped"],
             "skipped_in_use": res.get("skipped_in_use", 0),
+            "vanished": res.get("vanished", 0),
             "freed_bytes": res["freed"],
             "recycled_bytes": res.get("recycled", 0),
             "freed": format_size(res["freed"]),
@@ -406,14 +485,14 @@ def _tool_undo(args: dict[str, Any], allow_delete: bool) -> dict[str, Any]:
         return {"ok": False, "schema_version": SCHEMA_VERSION, "error": "没有可用的历史会话"}
     sid = args.get("session_id")
     if sid:
+        # 先按稳定的 session_id 精确匹配（v0.9.4 起每个会话都有）；
+        # 旧版本写入的会话没有该字段，才退回按 ts 匹配。v0.9.10：ts 精度只到秒，
+        # 同一秒内的多个会话会撞车，因此**优先** session_id，避免撤错会话。
         session = next(
-            (
-                s
-                for s in sessions
-                if str(s.get("session_id")) == str(sid) or str(s.get("ts")) == str(sid)
-            ),
-            None,
+            (s for s in sessions if str(s.get("session_id", "")) == str(sid)), None
         )
+        if session is None:
+            session = next((s for s in sessions if str(s.get("ts", "")) == str(sid)), None)
         if session is None:
             raise _ToolError(f"找不到会话: {sid}")
     else:
@@ -435,13 +514,36 @@ def _tool_undo(args: dict[str, Any], allow_delete: bool) -> dict[str, Any]:
             "would_restore": paths,
         }
     res = restore_paths(paths)
+    restored = list(res["restored"])
+    skipped = list(res["skipped"])
+    # v0.9.10 修复：此前无论恢复结果如何都返回 ok=True / status="restored"，
+    # 于是"一条都没恢复"（回收站里已没有对应记录、原位置已被新文件占用、
+    # 或非 Windows 平台）也会被 Agent 当成"已恢复"上报给用户。
+    # 现在：有恢复成功 → restored；一条都没成功 → ok=False + status="failed"；
+    # 部分成功 → ok=False + status="partial"（与 --json 删除的 partial 语义一致）。
+    if not restored:
+        reason = skipped[0] if skipped else "回收站中没有可恢复的记录"
+        return {
+            "ok": False,
+            "schema_version": SCHEMA_VERSION,
+            "status": "failed",
+            "session_id": session.get("session_id", ""),
+            "restored": [],
+            "skipped": skipped,
+            "restored_count": 0,
+            "requested_count": len(paths),
+            "error": f"未能恢复任何文件：{reason}",
+        }
+    partially = bool(skipped)
     return {
-        "ok": True,
+        "ok": not partially,
         "schema_version": SCHEMA_VERSION,
-        "status": "restored",
+        "status": "partial" if partially else "restored",
         "session_id": session.get("session_id", ""),
-        "restored": res["restored"],
-        "skipped": res["skipped"],
+        "restored": restored,
+        "skipped": skipped,
+        "restored_count": len(restored),
+        "requested_count": len(paths),
     }
 
 
@@ -485,6 +587,16 @@ def _tool_definitions(allow_delete: bool) -> list[dict[str, Any]]:
                 },
                 "additionalProperties": False,
             },
+        },
+        {
+            "name": "registry_scan",
+            "description": (
+                "**只读**扫描注册表中的垃圾候选（失效卸载表项 / MuiCache 孤儿缓存 / "
+                "失效 App Paths），返回位置、原因与严重程度。本工具**不会**删除任何"
+                "注册表项（本工具不提供注册表清理能力）。"
+                " Read-only registry junk scan; never deletes registry entries."
+            ),
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
             "name": "preview_delete",
@@ -636,6 +748,8 @@ def handle_message(
                 payload = _tool_health(args, deep)
             elif name == "history":
                 payload = _tool_history(args, deep)
+            elif name == "registry_scan":
+                payload = _tool_registry_scan(args, deep)
             elif name == "preview_delete":
                 payload = _tool_preview_delete(args, deep)
             elif name == "delete":

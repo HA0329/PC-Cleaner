@@ -27,6 +27,23 @@ def _clear_manifests():
     mcp._MANIFESTS.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_history(tmp_path, monkeypatch):
+    """把历史/审计重定向到临时目录。
+
+    v0.9.9 起 MCP ``delete`` 会写 ``history.json`` + ``audit.log``（修复"Agent
+    删除不留痕"）。若不隔离，跑一次测试就会往**用户的真实配置目录**写入若干条
+    假会话（并污染 ``--history`` / ``--undo-last`` 的语义）。
+    """
+    from pc_cleaner import config, history
+
+    monkeypatch.setattr(config, "history_path", lambda: tmp_path / "history.json")
+    monkeypatch.setattr(config, "audit_path", lambda: tmp_path / "audit.log")
+    monkeypatch.setattr(history, "history_path", lambda: tmp_path / "history.json")
+    monkeypatch.setattr(history, "audit_path", lambda: tmp_path / "audit.log")
+    yield tmp_path
+
+
 def _target(tmp_path: Path, name: str, size: int = 10) -> Target:
     p = tmp_path / name
     p.write_bytes(b"x" * size)
@@ -99,7 +116,8 @@ def test_tools_list_hides_write_tools_by_default():
         t["name"]
         for t in mcp.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
     ]
-    assert names == ["scan", "health", "history", "preview_delete"]
+    # v0.9.9：只读工具表新增 registry_scan（注册表垃圾只读扫描）
+    assert names == ["scan", "health", "history", "registry_scan", "preview_delete"]
     assert "delete" not in names and "undo" not in names
 
 

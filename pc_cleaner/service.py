@@ -144,11 +144,13 @@ ENVELOPE_SCHEMA: dict[str, Any] = {
                 "cancelled",
                 "interrupted",
                 "restored",
+                "failed",
                 "ok",
                 "error",
             ],
             "description": (
-                "ok = 只读操作（如 --health）全部正常；error = 存在 error 级结果或参数错误"
+                "ok = 只读操作（如 --health）全部正常；error = 存在 error 级结果或参数错误；"
+                "failed = （MCP）undo 一条都没恢复"
             ),
         },
         "exit_code": {"type": "integer", "enum": [0, 1, 2, 3, 4, 130]},
@@ -159,6 +161,24 @@ ENVELOPE_SCHEMA: dict[str, Any] = {
         "total_targets": {"type": "integer"},
         "recycle_bin_size_bytes": {"type": "integer"},
         "health": {"type": "object"},
+        "registry": {
+            "type": "object",
+            "description": (
+                "v0.9.9：注册表垃圾**只读**扫描结果（--registry-scan --json）。"
+                "本工具不会删除任何注册表项。"
+            ),
+            "properties": {
+                "available": {"type": "boolean"},
+                "note": {"type": "string"},
+                "read_only": {"type": "boolean", "const": True},
+                "total": {"type": "integer"},
+                "counts": {"type": "object"},
+                "scanned": {"type": "object"},
+                "findings": {"type": "array", "items": {"type": "object"}},
+                "skipped": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": True,
+        },
         "action": {
             "type": "object",
             "properties": {
@@ -167,6 +187,13 @@ ENVELOPE_SCHEMA: dict[str, Any] = {
                 "failed": {"type": "integer"},
                 "skipped": {"type": "integer"},
                 "skipped_in_use": {"type": "integer"},
+                "vanished": {
+                    "type": "integer",
+                    "description": (
+                        "v0.9.10：扫描后、删除前已不存在、未执行删除的目标数"
+                        "（不计入 deleted，也不计入 freed_bytes）"
+                    ),
+                },
                 "freed_bytes": {"type": "integer"},
                 "recycled_bytes": {"type": "integer"},
                 "selected": {"type": "array", "items": {"type": "string"}},

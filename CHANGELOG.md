@@ -1,5 +1,192 @@
 # Changelog
 
+## 0.9.10 (2026-09)
+
+> 主题：**一次针对真实机器的逐项复核 + 11 处修复**。
+> 两条主线：①"承诺与实现不一致"的地方全部对齐（README 说不会静默降级，代码其实会；
+> 配置说禁用了某分类，Agent 其实照样能删）；②报数与退出码如实
+> （删了多少、释放了多少、恢复到什么程度，都必须能对上）。
+> 全部修复都配了回归测试，测试数 298 → 347（含 49 个新守门用例）。
+
+### 安全修复（重要）
+
+- **回收站不可用时不再静默永久删除**（`engine.py`）：`_delete_path` 的条件原本写作
+  `mode is RECYCLE and HAS_SEND2TRASH`，条件不成立时**直接落到永久删除分支**。
+  后果：send2trash 未装/导入失败时（显式 `--recycle`、MCP 调用、运行期依赖损坏），
+  文件被永久删除，而用户以为进了回收站可以撤销 —— 与 README「send2trash 是必需依赖，
+  **不再静默降级为永久删除**」和 `pyproject.toml` 的注释直接矛盾。
+  现在回收站不可用时**整批拒绝执行**：引擎抛错并全部计入 `failed`（原文件一个不删），
+  `--recycle` 在 CLI 启动阶段就返回退出码 1 并给出 `pip install send2trash` /
+  `--permanent` 两条出路；清空目录（`_clear_dir_content`）同样拒绝。
+- **MCP 现在遵守 `enabled_categories`**（`mcp.py`）：`_scan_categories` 之前用
+  `get_all_category_specs()`，绕过了用户在 `config.json` 里显式关掉的分类 ——
+  实测 `enabled_categories=["system_temp"]` 时，`preview_delete(["dev_caches"])`
+  仍返回 7 个目标并发放 `confirm_token`。现在改用 `get_enabled_category_specs()`，
+  被禁用分类直接报错（而不是静默变成 0 目标，让 Agent 以为"这类没东西可清"）。
+- **`--exclude recycle_bin` 与 `--clean recycle_bin` 的矛盾输入被拒绝**（`cli.py`）：
+  `recycle_bin` 不属于 `rules.json` 的分类，由引擎特殊处理，因此 `--clean` 与
+  `--exclude` 同时提到它时，"排除"会被静默忽略、**回收站照样被清空**（不可恢复）。
+  现在这种自相矛盾的输入在 CLI 与 `--json` 两条路径上都返回退出码 1 并说明原因。
+
+### 报数与退出码如实
+
+- **MCP `undo` 不再谎报成功**：此前无论恢复结果如何都返回
+  `ok=true / status="restored"`，实测"回收站里已无对应记录"时返回
+  `{"ok": true, "restored": []}`，Agent 会把"一条都没恢复"上报成"已恢复"。
+  现在：全部成功 → `restored`；部分成功 → `ok=false / status="partial"`；
+  一条都没成功 → `ok=false / status="failed"` + `error`，并附带
+  `restored_count` / `requested_count`。`session_id` 匹配也改为**优先精确匹配**
+  `session_id`，只对旧会话回退按 `ts`（`ts` 精度到秒，同秒会话会撞车）。
+- **`--undo-last` 按实际结果返回退出码**（`commands.py`）：此前无论恢复成功与否都
+  `return 0`，脚本按退出码分支时会把"恢复全部落空"当成成功。现在部分/全部失败返回
+  3（`EXIT_DELETE_FAILED`），非回收站会话或非 Windows 返回 1。
+- **删除计数与释放量如实**（`engine.py`）：目标在扫描后、删除前被外部删掉时，
+  `_delete_path` 抛出的 `FileNotFoundError` 被吞进"预期错误"分支，随后
+  `deleted += 1` 照旧执行、`freed += t.size` 照旧累加 —— 从未删除的文件被算作
+  "删除成功 + 释放 X 字节"。现在：
+  * 新增 `vanished` 计数（`--json` 的 `action.vanished`、MCP 的 `already_gone`），
+    这类目标不计入 `deleted`，也不计入 `freed`；
+  * `freed` 一律按**删除前后实测体积差**计算（文件与目录都是），不再是扫描时的估计值；
+  * 菜单汇总里如实提示"（N 项目标在扫描后已不存在，无需清理）"。
+
+### 交互与工程修复
+
+- **`--admin` 提权的两个真实缺陷**（`commands.py`）：
+  1. 提权标记无效 —— `ShellExecuteW` **不继承父进程环境变量**，而旧实现是在父进程里
+     `os.environ["PC_CLEANER_ELEVATED"] = "1"`，于是新进程读不到，
+     `ui.is_elevated()` 恒为 False、菜单里的 `[ADMIN] / [UAC 提权]` 标识**从未显示过**。
+     现在标记由命令行注入（`cmd /c set PC_CLEANER_ELEVATED=1 && …`），确定生效。
+  2. 参数被拆散 —— 旧实现用裸的 `" ".join(argv)` 拼接，`--export-config "D:\My Dir\cfg.json"`
+     提权后被拆成两个参数、新进程直接 argparse 报错。现在每个参数单独转义
+     （`_quote_arg`，规则与 `subprocess.list2cmdline` 一致），并把整条命令行交给
+     `ShellExecuteW`，带空格的 Python 路径也能正确解析。
+- **`pc_cleaner.bat` 保留参数引号**：`%~1` 会剥掉引号，旧实现用
+  `set "ARGS=%ARGS% %~1"` 重建，于是 `pc_cleaner.bat --export-scan "D:\My Dir\scan.json"`
+  被拆成两个参数。现在写成 `set ARGS=%ARGS% "%~1"`（多一轮解析正好还原原来的参数边界），
+  实测 `ARGV=['--export-scan', 'D:\\My Dir\\scan file.json', '--clean', 'system_temp']`。
+- **glob 不产出起点目录 → 规则全平台静默空转**（`scanner.py`）：`base.glob()` /
+  `rglob()` 都不包含 `base` 自身，因此"base 自己就符合 pattern"的规则
+  （如 `winevt\Logs` + `pattern="*"`）在**任何平台**都匹配不到东西；POSIX 上还叠加
+  反斜杠/`os.sep` 差异，同一规则在 Windows 可用、Linux/macOS 全失配。
+  新增 `_pattern_matches_dir()`（与 `Path.glob` 同语义：无分隔符只比最后一层、
+  含分隔符要求尾部组件连续全等），`glob_dirs` / `glob_files` 都把 base 自身纳入候选。
+- **`--validate-rules --audit-rules` 的可信度修复**（`rules.py`）：
+  * 判定"规则是否失效"必须看**所有候选路径**（`paths`/`bases` 本就是为不同版本目录
+    布局引入的），此前只看第一个候选，把"候选 A 不存在、候选 B 有内容"的规则误报为失效；
+  * 探测不再用 `glob.glob(base + pattern)` —— `glob` 的 `*` **不匹配目录**，
+    这让"base 下有一堆子目录"的规则被误判为"无匹配内容"（本机实测
+    `Edge/User Data` 明明有 `Default/Cache` 却被列为可疑）；现在按扫描器同一套
+    语义逐层浅探测；
+  * 分组键加入 `pattern` 并输出 `pattern=...`：同一个 base 常被多条规则共用
+    （Edge User Data 下有 8 条），此前只有 1 条失效也会显示成"共 8 条规则"，
+    把告警的指向性稀释掉；
+  * `_cmd_validate_rules` 不再吞掉审计异常 —— 此前任何异常都表现为
+    "校验通过、零警告"（本次开发中就因此短暂掩盖过一次 `ValueError`）。
+- **`java_rdp_legacy` 的风险错配**：该分类（`risk=safe`，会被 `--all` 选中）里挂着
+  `%USERPROFILE%\Documents\Remote Desktop\Cache` —— 物理上位于用户文档目录内，
+  工具自己的校验器都会警告"指向用户数据目录却标 safe"。现拆出独立分类
+  `rdp_legacy_cache`（`risk=moderate`，需显式选择），29 → 30 个分类，
+  目标数仍为 276。
+
+### 文档与仓库
+
+- README：分类数 29 → 30（补 `rdp_legacy_cache` 行）、`--deep` 会同时把遍历深度
+  提到至少 50 层、安全保证第 2/9/10 条按新行为重写、`--json` 契约补 `vanished`、
+  修掉第 165 行少一个换行导致错行的表格、测试数 296 → 314，
+  并写明"测试须在项目根目录运行"。
+- `docs/mcp.md` / `docs/json-contract.md`：补 `enabled_categories` 约束、
+  `undo` 的 `failed`/`partial` 语义、`delete` 的 `vanished`/`already_gone` 字段、
+  `action.vanished` 字段说明，以及 `--json-schema` 的对应更新。
+- 删掉仓库里带进来的 `__pycache__/*.pyc` 等构建产物。
+
+### 测试
+
+- 新增 `tests/test_v0910_fixes.py`（49 个用例）：回收站不可用时的整批拒绝（文件与
+  清空目录两条路径）、`vanished` 不计入 `deleted`/`freed`、`freed` 实测差、
+  recycle_bin 矛盾输入（CLI + `--json`）、MCP 的 `enabled_categories` 约束、
+  MCP `undo` 三态、`--undo-last` 退出码、提权命令行转义与环境标记、
+  `.bat` 参数引号（真的跑一遍 cmd 解析循环）、glob 起点目录匹配、
+  审计多候选路径与按 pattern 分组，以及文档口径与实现一致性（分类数/规则数/
+  版本号/README 表格/README 里的测试数自动对照 pytest 收集结果）。
+- 全套 **347 passed**（原 298 + 49）。
+
+## 0.9.9 (2026-09)
+
+> 主题：**对齐火绒的五项清理能力 + 修掉 0.9.8 遗留的四处问题**。
+> 新增「失效快捷方式」「使用痕迹」两个分类与「注册表垃圾只读扫描」，
+> 并在实现过程中用本机真实数据把三处会误伤用户的判定问题挡在发布之前
+> （离线盘被判死链、命名空间快捷方式被判死链、MSI 残留误报 41 条）。
+
+### 新增：失效快捷方式清理（`broken_shortcuts`，🔴 risky）
+
+- **`lnk.py`：纯 Python 解析 `.lnk`**（零依赖、只读、无 COM）。为什么不用
+  `WScript.Shell`：COM 只能在真实桌面会话跑（单元测试无法断言、服务/沙箱下不可用）、
+  每个快捷方式一次往返几十毫秒、还会加载 shell 扩展。本机实测 81 个快捷方式
+  **与 COM 逐条比对，目标路径 0 不一致、0 漏解析**。
+- 解析覆盖三条真实存在的数据路径：`LinkInfo.LocalBasePath`、
+  **`EnvironmentVariableDataBlock`**（任务管理器/注册表编辑器这类
+  `ForceNoLinkInfo` 快捷方式的目标**只**在这里，不解析会把本机 34/81 个系统工具
+  快捷方式误判成死链）、`StringData` 相对路径（拼接后**折叠 `..`** ——
+  不折叠会把完全有效的快捷方式判成"目标不存在"）。
+- **四档判定，只有一档可清**：`ok` / `broken`（卷可访问但目标确实不存在 → 清理）/
+  `unavailable`（离线盘、未插的移动盘、断开的共享）/ `unknown`（URL、系统命名空间
+  如文件资源管理器/控制面板/回收站）/ `invalid`（0 字节 UWP 占位符、损坏文件）。
+  后三档**一律不动**：把"插上盘就能用"的快捷方式删掉是不可接受的。
+- 规则覆盖用户/公共开始菜单、桌面、快速启动栏；**默认递归**（开始菜单是多层目录，
+  单层 glob 会漏掉绝大多数）；`Startup` 开机启动目录默认排除。
+
+### 新增：使用痕迹清理（`usage_traces`，🟡 moderate）
+
+- 最近打开的文档、跳转列表缓存（`AutomaticDestinations`/`CustomDestinations`）、
+  PowerShell 命令历史；不删除任何用户文件，清空后由系统自动重建。
+- **把 `Recent` 从 `system_temp`（🟢 safe）里移出**：此前"最近文档/跳转列表"
+  挂在 safe 分类下，会被 `--all` 静默清空 —— 属于使用痕迹的操作不该藏在
+  "安全、随便清"里，现在由独立分类显式管理。
+
+### 新增：注册表垃圾只读扫描（`--registry-scan` / MCP `registry_scan`）
+
+- 列出三类**证据充分**的可疑项：失效卸载表项、MuiCache 孤儿缓存、失效 App Paths。
+  每条都带位置、值名、判定原因与严重程度。
+- **只报告，不删除**：CLI 与 MCP **都没有**注册表清理入口（`read_only` 恒为 `true`）。
+  删除注册表项不释放磁盘空间，误删风险却很高；详见 SECURITY.md 的设计边界。
+- 实现过程中把误报压到 0，三处关键修正（都在发布前用本机 58+18+1 条卸载表项实测）：
+  1. 最初用"压缩产品码匹配"判断 MSI 是否还在装，41 条 MSI 表项**全部误报**成残留
+     （里面是仍在使用的 VC++/Node.js/Java 运行时）——Windows 的压缩算法与公开文档
+     不一致。改为调用 Windows Installer API `MsiQueryProductStateW` 做**权威判定**，
+     并区分"未安装(False)"与"无法判定(None)"：**只有 False 才报**。
+  2. 根键解析写了 `HKEY_HKLM` 这种不存在的常量名，整场扫描静默空转，
+     表现却是"扫描完成、0 条记录"（像系统很干净）。现在有 `HKLM→HKEY_LOCAL_MACHINE`
+     映射表，并在"一个位置都没读到"时如实报"结果不可信"。
+  3. `UninstallString` 解析用正则漏掉了最常见的
+     `C:\Program Files\...\uninst.exe`（无引号带空格），改为确定性解析：
+     引号优先、无引号时按"磁盘上确实存在"的候选切分。
+
+### 修复（0.9.8 遗留）
+
+- **菜单刷新扫描的参数错位（影响功能正确性）**：`menu._interactive` 调
+  `_scan_for_menu(specs, show_progress, scan_depth, workers)`，而函数签名是
+  `(specs, scan_depth, workers, show_progress)`，于是 `scan_all` 实际收到
+  `scan_depth=True`（**=1 层**）与 `workers=20`（超出 16 上限）。后果：菜单里按
+  `x`/`f` 重扫后，`find_dirs` 类规则（`__pycache__`、`node_modules`、Steam
+  shadercache）**扫不到深层目标**（实测 4 层深的 `node_modules`：正确深度命中 1 个，
+  `True` 命中 0 个）。现在改用关键字实参，并加回归测试断言 `scan_depth` 不是 bool。
+- **MCP `delete` 不写历史与审计**：`mcp._tool_delete` 既不传 `audit` 也不
+  `append_session`，导致**经 MCP 删掉的文件无法用 `--undo-last` / MCP `undo` 找回**
+  （`undo` 只读 `history.json`）——与"审计留痕、默认可撤销"的承诺矛盾。
+  现在与交互式流程一致：逐条写 `audit.log` + 落一条 `history.json`（`note="mcp"`），
+  返回值新增 `history_recorded`。
+- **`print_detail_report` 的死代码**：`separator("═") if hasattr(separator, '__call__')
+  else "=" * 60` —— `hasattr` 恒为 True，`else` 分支永远走不到。已去掉三元表达式。
+- **`rules.validate_rules` 的孤立字符串**：函数体开头有两段相邻字符串，第一段
+  （真正的 docstring 内容）被第二段顶掉，实际 `__doc__` 只剩半截。已合并为一段。
+
+### 测试
+
+- 新增 `tests/test_v099_features.py`（38 个用例）：`.lnk` 字节级构造与四档判定、
+  扫描器筛选边界（`include_unavailable` / `exclude_dirs` / 递归开关）、
+  菜单参数回归、MCP 留痕、注册表辅助函数与"只读"保证。
+- 全套 **296 passed**（原 258 + 38）。
+
 ## 0.9.8 (2026-09)
 
 > 主题：**安全防线补齐 + 规则跨版本兼容 + 交互可用性**。

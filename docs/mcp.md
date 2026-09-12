@@ -3,7 +3,7 @@
 让 AI Agent（Claude Desktop / DSH / 自研 Agent）以**受控的两阶段流程**使用 PC-Cleaner。
 
 ```bash
-python -m pc_cleaner --mcp                       # 只读：scan / health / history / preview_delete
+python -m pc_cleaner --mcp                       # 只读：scan / health / history / registry_scan / preview_delete
 python -m pc_cleaner --mcp --mcp-allow-delete    # 额外暴露 delete / undo
 ```
 
@@ -21,6 +21,10 @@ python -m pc_cleaner --mcp --mcp-allow-delete    # 额外暴露 delete / undo
 | **危险操作二次授权** | 清单含高风险分类 / 永久删除 / 清空回收站时，`delete` 必须带 `acknowledge_danger=true` |
 | **token 一次性** | 用过即失效；token 绑定清单内容哈希，不能跨清单复用 |
 | **无删除的预览** | `preview_delete` 永远不会调用删除引擎（有单元测试断言） |
+| **留痕可撤销** | v0.9.9：`delete` 写 `history.json` + `audit.log`，删掉的东西可用 `undo` 找回（此前 Agent 删除不留痕，撤销永远落空） |
+| **遵守本机配置** | v0.9.10：`enabled_categories` 里被用户关掉的分类，`preview_delete` 直接报错、不返回清单（此前该配置对 Agent 完全不生效，Agent 能删掉用户明确禁用分类里的东西） |
+| **如实上报恢复结果** | v0.9.10：`undo` 一条都没恢复 → `ok:false / status:"failed"`；部分恢复 → `status:"partial"`（此前无论结果都返回 `ok:true / status:"restored"`） |
+| **注册表只读** | `registry_scan` 只报告不修改；MCP 层**不存在**任何注册表清理工具 |
 
 ## 工具
 
@@ -29,9 +33,18 @@ python -m pc_cleaner --mcp --mcp-allow-delete    # 额外暴露 delete / undo
 | `scan` | `deep?: bool` | 各分类体积统计（只读） |
 | `health` | — | 16 项只读体检（只读） |
 | `history` | `limit?: int` | 最近会话（含 `session_id`） |
+| `registry_scan` | — | 注册表垃圾候选（卸载残留 / MuiCache 孤儿 / 失效 App Paths），**只读** |
 | `preview_delete` | `categories: string[]`（必填）、`mode?: "recycle"\|"permanent"`、`deep?`、`min_size_mb?`、`older_than_days?`、`ext?` | `confirm_token`、`expires_in_seconds`、`targets[]`、`total_bytes`、`dangerous[]` |
-| `delete` | `confirm_token: string`（必填）、`acknowledge_danger?: bool` | `status`（`deleted` / `partial` / `needs_repreview`）、`result{freed_bytes, recycled_bytes, skipped_in_use…}` |
-| `undo` | `session_id?`、`dry_run?` | `restored[]` / `skipped[]`（仅 `recycle` 会话） |
+| `delete` | `confirm_token: string`（必填）、`acknowledge_danger?: bool` | `status`（`deleted` / `partial` / `needs_repreview`）、`history_recorded`、`already_gone`、`result{freed_bytes, recycled_bytes, skipped_in_use, vanished…}` |
+| `undo` | `session_id?`（优先精确匹配 `session_id`，回退按 `ts`）、`dry_run?` | `status`（`restored` / `partial` / `failed` / `dry_run`）、`restored[]`、`skipped[]`、`restored_count`、`requested_count` |
+
+> v0.9.9：MCP `delete` 现在与交互式流程一样写 `history.json` + `audit.log`
+> （此前不留痕，导致 Agent 删掉的文件无法 `--undo-last` 找回）。返回字段新增
+> `history_recorded`。`registry_scan` 是**只读**能力，本工具**不提供**注册表清理工具。
+>
+> v0.9.10：`delete` / `preview_delete` 受配置 `enabled_categories` 约束；
+> `undo` 不再"无论结果都报 restored"；`delete` 结果里 `vanished` /
+> `already_gone` 表示"扫描后、删除前就已不存在"的目标数（不计入 `deleted`）。
 
 所有工具返回 `content[0].text`（JSON 字符串）**与** `structuredContent`（对象），
 便于不同客户端解析。

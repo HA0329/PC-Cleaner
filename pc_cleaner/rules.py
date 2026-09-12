@@ -329,6 +329,16 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
         "description": "DISM/CBS/waasmedic 日志、WMI 与安装日志、USB 安装日志、传递优化缓存、USOShared 更新状态",
         "risk": "safe",
     },
+    "broken_shortcuts": {
+        "label": "失效快捷方式",
+        "description": "开始菜单/桌面/快速启动栏中目标已被卸载或删除的死链（离线盘、移动盘、网络共享与系统命名空间不动）",
+        "risk": "risky",
+    },
+    "usage_traces": {
+        "label": "使用痕迹",
+        "description": "最近打开的文档、跳转列表缓存、PowerShell 命令历史（不删用户文件，清空后系统自动重建）",
+        "risk": "moderate",
+    },
     "windows_old": {
         "label": "旧版 Windows 残留",
         "description": "C:\\Windows.old（功能更新残留，占用巨大，删除不可恢复）",
@@ -378,6 +388,12 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
         "label": "Java/远程桌面/字体缓存",
         "description": "Java 部署缓存、远程桌面位图缓存、系统字体缓存（可重建）",
         "risk": "safe",
+    },
+    "rdp_legacy_cache": {
+        "label": "远程桌面旧版缓存(用户文档)",
+        "description": "「文档\\Remote Desktop\\Cache」中的剪贴板/位图缓存：可重建，"
+                       "但位于用户文档目录内，故与 safe 分类分开、需显式选择",
+        "risk": "moderate",
     },
     "crash_telemetry": {
         "label": "崩溃上报与遥测数据",
@@ -547,6 +563,7 @@ VALID_TARGET_TYPES: set[str] = {
     "compact_db",     # 对 SQLite 数据库执行 VACUUM 压缩（不删除，BleachBit「整理优化数据库」）
     "empty_dirs",     # 删除 base 下的空目录（递归，可配置 min_age_days）
     "zero_byte_files",  # 删除 base 下的 0 字节残留文件
+    "broken_shortcuts",  # 清理目标已不存在的 .lnk 死链（v0.9.9，纯 Python 解析）
 }
 # 合法的目录/文件动作
 VALID_ACTIONS: set[str] = {"clear", "delete"}
@@ -602,10 +619,9 @@ def _has_clear_root_under(base_norm: str) -> bool:
 def _target_locations(t: dict[str, Any]) -> list[str]:
     """取出 target 里可以静态展开的路径（path/paths / base/bases）。"""
     out: list[str] = []
-    if isinstance(t.get("path"), str):
-        out.append(t["path"])
-    if isinstance(t.get("base"), str):
-        out.append(t["base"])
+    for key in ("path", "base"):
+        if isinstance(t.get(key), str):
+            out.append(t[key])
     for key in ("paths", "bases"):
         vals = t.get(key)
         if isinstance(vals, (list, tuple)):
@@ -643,7 +659,8 @@ def _warn_protected_targets(specs, warnings: list[str]) -> None:
                     continue
                 # base 型规则：只要 base 之下还有白名单清空根，就不算完全空转
                 if ttype in ("glob_dirs", "glob_files", "files_by_rule", "compact_db",
-                             "empty_dirs", "zero_byte_files", "find_dirs"):
+                             "empty_dirs", "zero_byte_files", "find_dirs",
+                             "broken_shortcuts"):
                     if _has_clear_root_under(norm):
                         continue
                 warnings.append(
@@ -678,6 +695,53 @@ def _literal_prefix(pattern: str) -> str:
     return head.strip("/\\")
 
 
+def _glob_rule_has_content(
+    norm_base: str,
+    pattern: str,
+    *,
+    want_dir: bool,
+    match_dir_pred=None,
+    depth_limit: int = 6,
+) -> bool:
+    """``glob`` 类规则在本机是否**真的能匹配到东西**（v0.9.10）。
+
+    为什么不用 ``glob.glob(os.path.join(base, pattern))``：``glob`` 的 ``*``
+    **不匹配目录**，因此"base 下有一堆子目录"的规则会被判成"无匹配内容"，
+    制造大量假阳性（本机实测 ``%LOCALAPPDATA%/Microsoft/Edge/User Data`` 明明
+    有 ``Default/Cache``，却被列进"目录存在但匹配不到内容"）。
+
+    这里按扫描器同一套语义判定（``scanner._pattern_matches_dir``）：
+    先看 base 自身是否匹配（glob 不产出起点目录），再逐层下探到 ``depth_limit``，
+    只要出现一个匹配项就返回 True。只做浅探测，不做体积统计。
+    """
+    if match_dir_pred is None:
+        return False
+    try:
+        root = Path(norm_base)
+        if not root.is_dir():
+            return False
+        # 1) base 自身匹配（scanner 已补上这一条）
+        if match_dir_pred(root, root, pattern):
+            return True
+        # 2) 逐层下探
+        for dirpath, dirnames, filenames in os.walk(norm_base):
+            rel = Path(dirpath).relative_to(root)
+            for name in dirnames:
+                if match_dir_pred(root, Path(dirpath) / name, pattern):
+                    return True
+            if not want_dir:
+                for name in filenames:
+                    if match_dir_pred(root, Path(dirpath) / name, pattern):
+                        return True
+            # 先判定完本层再决定是否继续下探：此前在循环开头就清空 dirnames，
+            # 结果"刚好位于深度上限那一层"的匹配项永远不会被检查（假阳性）。
+            if len(rel.parts) >= depth_limit:
+                dirnames[:] = []
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def _warn_dead_targets(specs, warnings: list[str]) -> None:
     """本机存活性审计（v0.9.8）：警告「在本机永远匹配不到任何东西」的规则。
 
@@ -694,9 +758,20 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
     本函数只做**浅探测**（exists / 单层 glob），不做递归体积计算，因此开销很小；
     探测不到时只发**警告**，不影响退出码——因为规则本就是给多台机器共用的，
     "本机没装这个软件"是完全正常的情况。
-    """
-    import glob as _glob
 
+    v0.9.10 修正：判定"这条规则是否死"必须看**所有候选路径**
+    （``paths`` / ``bases`` 是 v0.9.8 为"同一软件不同版本目录布局"引入的），
+    只要**任意一个**候选在本机有内容，规则就是有效的。此前只看
+    ``raws[0]``，于是"候选 A 不存在、候选 B 存在且有内容"的规则会被误报成失效规则，
+    还会连累本机存活性审计的可信度。
+    """
+    # v0.9.10：与 scanner 的 glob 语义保持一致（glob 不产出起点目录，
+    # base 自身匹配 pattern 时同样算"有内容"）
+    try:
+        from .scanner import _pattern_matches_dir
+    except Exception:  # noqa: BLE001 校验不应因扫描器导入失败而中断
+        def _pattern_matches_dir(*_args, **_kwargs) -> bool:  # type: ignore[misc]
+            return False
     dead: list[tuple[str, str]] = []
     for cat in specs:
         if not isinstance(cat, dict):
@@ -711,6 +786,8 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
             raws = [r for r in _target_locations(t) if r != "<CWD>"]
             if not raws:
                 continue
+            # 逐个候选独立判定；任一候选"有内容"即视为规则有效
+            bases_ok = False
             alive = False
             for raw in raws:
                 norm = _expand_for_validation(raw)
@@ -722,19 +799,32 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
                 try:
                     if ttype in ("clear_dir", "delete_dir"):
                         if p.is_dir():
+                            bases_ok = True
                             alive = True
                             break
-                    elif ttype in ("glob_dirs", "glob_files", "compact_db"):
-                        pattern = t.get("pattern") or ""
+                    elif ttype in ("glob_dirs", "glob_files", "compact_db",
+                                   "broken_shortcuts"):
+                        # broken_shortcuts 的 pattern 可省略（默认 *.lnk）
+                        pattern = t.get("pattern") or (
+                            "*.lnk" if ttype == "broken_shortcuts" else ""
+                        )
                         if not pattern:
                             alive = True
                             break
+                        if p.is_dir():
+                            bases_ok = True
                         # 关键：pattern 自身可能带通配（如 `*/Cache`、`Cache_Data`），
-                        # 必须把它拼在 base 上一起 glob 才算数，否则会把
-                        # 「base 存在、只是没有那一层子目录」误报成死规则。
-                        # 注意 `%WINDIR%` 这类 base 本身可能存在但下面什么都没有。
+                        # 必须按**扫描器同一套语义**判断，否则会把
+                        # 「base 存在、只是那一层是目录」误报成死规则
+                        # （glob.glob 的 `*` 不匹配目录，是本机审计噪声的主要来源）。
                         try:
-                            if _glob.glob(os.path.join(norm, pattern)):
+                            want_dir = ttype in ("glob_dirs", "compact_db",
+                                                 "broken_shortcuts")
+                            if _glob_rule_has_content(
+                                norm, pattern,
+                                want_dir=want_dir,
+                                match_dir_pred=_pattern_matches_dir,
+                            ):
                                 alive = True
                                 break
                         except Exception:  # noqa: BLE001 非法 pattern 不作为死规则依据
@@ -751,14 +841,17 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
                                 alive = True
                                 break
                         # 纯字面 pattern（无通配）且 base 存在但该项不存在 →
-                        # 落到这里，保持 alive=False，如实报为失效规则。
-                    elif ttype in ("empty_dirs", "zero_byte_files", "files_by_rule"):
+                        # 落到这里，继续看下一个候选
+                    elif ttype in ("empty_dirs", "zero_byte_files", "files_by_rule",
+                                   "broken_shortcuts"):
                         if p.is_dir():
+                            bases_ok = True
                             alive = True
                             break
                     elif ttype == "find_dirs":
                         # find_dirs 的 bases 是"从哪里开始找"，目录存在即视为可用
                         if p.is_dir():
+                            bases_ok = True
                             alive = True
                             break
                     else:
@@ -770,22 +863,31 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
             if not alive:
                 # 按"base 是否存在"分类：base 缺失=软件没装（最不可疑）；
                 # base 在但 pattern 匹配不到=目录布局变了（最可疑，优先展示）。
-                try:
+                # v0.9.10：展示与分组都以**第一个存在的候选**为准，避免把
+                # "候选 A 不存在"误当成整条规则的判定依据。
+                norm_first = ""
+                for raw in raws:
+                    cand_norm = _expand_for_validation(raw) or raw
+                    try:
+                        if Path(cand_norm).is_dir():
+                            norm_first = cand_norm
+                            break
+                    except OSError:
+                        continue
+                if not norm_first:
                     norm_first = _expand_for_validation(raws[0]) or raws[0]
-                    base_ok = Path(norm_first).is_dir()
-                except OSError:
-                    base_ok = False
+                base_ok = bool(bases_ok) or Path(norm_first).is_dir()
                 pat = t.get("pattern")
                 dead.append((loc, raws[0], norm_first, base_ok, pat))
 
     if not dead:
         return
-    # 先按 base 是否存在于磁盘分组，再按路径归并
-    grouped: dict[tuple[str, bool], list[tuple[str, str]]] = {}
-    for loc, raw, norm, base_ok, _pat in dead:
-        grouped.setdefault((norm, base_ok), []).append((loc, raw))
+    # 按 (base, pattern) 归并同名失效规则，再按 base 是否存在分组
+    grouped: dict[tuple[str, str | None, bool], list[tuple[str, str]]] = {}
+    for loc, raw, norm, base_ok, pat in dead:
+        grouped.setdefault((norm, pat, base_ok), []).append((loc, raw))
 
-    base_missing = sum(1 for (n, ok) in grouped if not ok)
+    base_missing = sum(1 for (n, _p, ok) in grouped if not ok)
     base_present = len(grouped) - base_missing
     warnings.append(
         f"本机存活性审计：{len(dead)} 条规则在本机匹配不到任何内容，"
@@ -794,17 +896,21 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
         f"{base_missing} 个位置的目录本就不存在 → 通常是没装该软件）。"
     )
     # 优先展示"目录存在但匹配不到"的（真正可疑：多半是路径随版本过时），
-    # 再按涉及规则数降序；"目录不存在"（没装该软件）排在后面。
+    # 再按同名失效规则数降序；"目录不存在"（没装该软件）排在后面。
+    # v0.9.10：分组键加入 pattern —— 同一个 base 往往被多条规则共用
+    # （如 Edge User Data 下有 8 条规则），此前不区分 pattern，只有 1 条失效
+    # 也会显示成"共 8 条规则"，把告警的指向性稀释掉。
     ordered = sorted(
-        grouped.items(), key=lambda kv: (not kv[0][1], -len(kv[1]))
+        grouped.items(), key=lambda kv: (not kv[0][2], -len(kv[1]))
     )
-    for (norm, base_ok), items in ordered[:10]:
+    for (norm, pat, base_ok), items in ordered[:10]:
         loc, raw = items[0]
-        suffix = f"（共 {len(items)} 条规则）" if len(items) > 1 else ""
+        pat_txt = f"  pattern={pat!r}" if pat else ""
+        dup = f"（另有 {len(items) - 1} 条重复规则）" if len(items) > 1 else ""
         tag = "目录存在但无匹配内容" if base_ok else "目录不存在"
-        warnings.append(f"    · [{tag}] {raw}  ← {loc}{suffix}")
+        warnings.append(f"    · [{tag}] {raw}{pat_txt}  ← {loc}{dup}")
     if len(ordered) > 10:
-        remaining_suspect = sum(1 for (n, ok) in ordered[10:] if ok)
+        remaining_suspect = sum(1 for ((_n, _p, ok), _items) in ordered[10:] if ok)
         warnings.append(
             f"    · ...（其余 {len(ordered) - 10} 个位置，其中 {remaining_suspect} 个"
             f"目录存在但无匹配内容）"
@@ -838,7 +944,13 @@ def _warn_redundant_targets(specs, warnings: list[str]) -> None:
 
 
 def _warn_user_data_risk(specs, warnings: list[str]) -> None:
-    """警告「base/path 落在用户数据目录却标 safe」的风险错配。"""
+    """警告「base/path 落在用户数据目录却标 safe」的风险错配。
+
+    v0.9.10：``risk=safe`` 的分类会被 ``--all`` 静默选中，因此落在
+    ``Documents`` / ``Desktop`` 这类用户可见目录里的**任何**目标都应搬出 safe
+    （本机实测：``java_rdp_legacy`` 曾把 ``文档\\Remote Desktop\\Cache`` 挂在
+    safe 下，已拆为独立的 ``rdp_legacy_cache``（moderate））。
+    """
     for cat in specs:
         if not isinstance(cat, dict):
             continue
@@ -870,13 +982,11 @@ def validate_rules(
     *,
     audit_local: bool = False,
 ) -> ValidationReport:
-    """校验规则。
+    """校验规则列表，返回 :class:`ValidationReport`（空列表 = 无错误）。
 
     ``audit_local``：额外做本机**存活性审计**（v0.9.8，见 :func:`_warn_dead_targets`），
     列出在本机匹配不到任何路径的规则。默认关闭——因为"本机没装某软件"是常态，
     全量列出会淹没真正的问题；``--audit-rules`` 显式开启。
-    """
-    """校验规则列表，返回 :class:`ValidationReport`（空列表 = 无错误）。
 
     **错误（errors，导致 --validate-rules 退出码非 0）**覆盖：
     分类 key 重复/缺失、非法 risk、缺 label、非法 target 类型、
@@ -934,6 +1044,9 @@ def validate_rules(
                 t.get("path") or t.get("paths")
             ):
                 errors.append(f"{loc} 缺少 path（或 paths）")
+            # v0.9.9：broken_shortcuts 的根目录可以是 base 或 bases
+            if ttype == "broken_shortcuts" and not (t.get("base") or t.get("bases")):
+                errors.append(f"{loc} 缺少 base（或 bases）")
             if ttype in ("glob_dirs", "glob_files", "files_by_rule") and not (
                 t.get("base") or (ttype == "glob_dirs" and t.get("bases"))
             ):

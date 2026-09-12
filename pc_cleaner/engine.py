@@ -27,6 +27,16 @@ v0.9.2 改进：
 - **重解析点保护**：删除前拒绝符号链接 / junction（含链接自身），
   避免越界删到链接目标。
 - 回收站恢复成功后清理对应的 ``$I`` 元数据文件，避免残留孤立记录。
+
+v0.9.10 安全修复：
+- **回收站不可用时不再静默永久删除**：此前 ``_delete_path`` 的条件写作
+  ``mode is RECYCLE and HAS_SEND2TRASH``，条件不成立就直接落到「永久删除」——
+  用户以为文件进了回收站（可撤销），实际被永久删除。现在回收站不可用时
+  **一律拒绝删除并计入 failed**（``RECYCLE_UNAVAILABLE_REASON``），
+  与 README「send2trash 是必需依赖，不再静默降级」的承诺一致。
+- **删除计数与释放量如实**：目标在扫描后、删除前被外部删掉时记入 ``vanished``
+  （不再算作 ``deleted``，也不再虚报 ``freed``）；``freed`` 统一按**删除前后
+  实测体积差**计算，而不是扫描时的估计值。
 """
 
 from __future__ import annotations
@@ -61,6 +71,17 @@ except Exception:  # noqa: BLE001
 def recycle_available() -> bool:
     """是否支持删除到回收站。"""
     return HAS_SEND2TRASH
+
+
+#: 请求了「进回收站」但 send2trash 不可用时的统一文案。
+#: v0.9.10 安全修复：此前这种情况会**静默降级为永久删除**（见 _delete_path），
+#: 与 README「send2trash 是必需依赖，不再静默降级为永久删除」的承诺矛盾：
+#: 用户以为进回收站（可撤销），实际文件被永久删除且再也找不回来。
+RECYCLE_UNAVAILABLE_REASON = (
+    "请求「进回收站」但 send2trash 不可用（未安装或导入失败）："
+    "已保留原文件，未做任何删除。请先 pip install send2trash，"
+    "或用 --permanent 显式确认要永久删除。"
+)
 
 
 # ===========================================================================
@@ -230,15 +251,22 @@ def _delete_path(
     # 对于删除子项，一律使用 DELETE 动作（因为 _delete_path 只负责删除自身）
     _guard_path(real, is_protected, TargetAction.DELETE)
 
+    # v0.9.10 安全修复：请求回收站但 send2trash 不可用时**拒绝删除**。
+    # 此前该条件写作 `mode is CleanMode.RECYCLE and HAS_SEND2TRASH`，条件不成立时
+    # 直接落到下面的「永久删除」，即：回收站不可用时静默永久删除用户数据，
+    # 却仍按用户的理解"进回收站可恢复"。现在改为不删、抛错、由调用方计入 failed。
+    if mode is CleanMode.RECYCLE and not HAS_SEND2TRASH:
+        raise PermissionError(RECYCLE_UNAVAILABLE_REASON)
+
     # 执行删除（基于 real 路径）
-    if mode is CleanMode.RECYCLE and HAS_SEND2TRASH:
+    if mode is CleanMode.RECYCLE:
         try:
             send2trash.send2trash(str(real))
             return
         except Exception:
             if not recycle_fallback:
                 raise
-            # 回退到永久删除
+            # 显式配置 recycle_error_fallback=true：回退到永久删除
             mode = CleanMode.PERMANENT
 
     # 永久删除
@@ -280,6 +308,12 @@ def _clear_dir_content(
     避免越界删除链接目标。
     """
     from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
+
+    # v0.9.10 安全修复：与 _delete_path 同一道闸门。清空目录若按「回收站」执行，
+    # 而 send2trash 不可用，则**一个子项都不能删**（否则等于永久删除缓存内容）。
+    if mode is CleanMode.RECYCLE and not HAS_SEND2TRASH:
+        logger.warning("拒绝清空目录（回收站不可用，不降级为永久删除）: %s", path)
+        return (0, 1)
 
     if is_reparse_point(path):
         # v0.9.3 安全增强：CLEAR 根自身是符号链接 / junction 时拒绝。
@@ -371,16 +405,20 @@ def delete_targets(
     """执行删除。
 
     返回 ``{"deleted": n, "failed": n, "freed": bytes, "recycled": bytes,
-    "skipped": n, "skipped_in_use": n}``。
+    "skipped": n, "skipped_in_use": n, "vanished": n}``。
 
-    - ``deleted``：成功处理的目标数（COMPACT 目标也算一次成功处理）；
+    - ``deleted``：**确实被删除/清空**的目标数（目标在删除前就已消失、或什么都没能
+      删掉的 CLEAR 目标不计入——v0.9.10 修正，此前扫描后被外部删掉的目标也会算作
+      "删除成功"，让自动化脚本误以为清理生效了）；
     - ``failed``：抛错/完全没能清理的目标数；
-    - ``freed``：**实际释放**的字节数（永久删除/清空/压缩）；
+    - ``freed``：**实际释放**的字节数（永久删除按删除前后体积差；压缩按 VACUUM
+      前后差）；
     - ``recycled``：**进回收站**的字节数（v0.9.3 新增——进回收站不释放空间，
       要清空回收站才释放，因此不再混进 ``freed`` 虚报）；
     - ``skipped``：部分成功（清空目录时有子项被占用）的目标数；
     - ``skipped_in_use``：因目标被运行中进程占用而跳过的目标数（规则声明了
-      ``skip_if_in_use``，如 npm ``_npx``）。
+      ``skip_if_in_use``，如 npm ``_npx``）；
+    - ``vanished``：扫描到删除之间就已不存在、因而"无事可做"的目标数（v0.9.10）。
 
     ``recycle_fallback``：进回收站失败时是否回退为永久删除。
     ``None`` 时读取配置 ``recycle_error_fallback``（默认 False，即失败就保留）。
@@ -391,6 +429,9 @@ def delete_targets(
 
     ``audit``：每成功处理一个目标时回调 ``(path, size, mode, freed)``，
     用于审计日志/历史（``freed`` 为该目标实际释放的字节数）。
+
+    安全（v0.9.10）：``mode=RECYCLE`` 而 send2trash 不可用时，**整批拒绝执行**
+    （全部计入 ``failed``、不删任何文件），绝不静默降级为永久删除。
     """
     if recycle_fallback is None:
         recycle_fallback = bool(load_config().get("recycle_error_fallback", False))
@@ -404,10 +445,28 @@ def delete_targets(
     failed = 0
     skipped = 0
     skipped_in_use = 0
+    vanished = 0
     freed = 0
     recycled = 0
-    # v0.9.3：进回收站时空间并未真正释放（要清空回收站才释放），分开统计
-    recycle_mode = mode is CleanMode.RECYCLE and HAS_SEND2TRASH
+    # v0.9.3：进回收站时空间并未真正释放（要清空回收站才释放），分开统计。
+    # v0.9.10：recycle_mode 只在真的可用时才为 True，且下面会提前拒绝不可用的情况。
+    recycle_mode = mode is CleanMode.RECYCLE
+    if recycle_mode and not HAS_SEND2TRASH:
+        for i, t in enumerate(targets, start=1):
+            failed += 1
+            audit(t.path, 0, "recycle_unavailable", 0)
+            on_progress(i, total, f"[跳过] {t.path}（{RECYCLE_UNAVAILABLE_REASON}）")
+        logger.error("拒绝执行：%s", RECYCLE_UNAVAILABLE_REASON)
+        return {
+            "deleted": 0,
+            "failed": failed,
+            "freed": 0,
+            "recycled": 0,
+            "skipped": 0,
+            "skipped_in_use": 0,
+            "vanished": 0,
+            "recycle_unavailable": True,
+        }
     for i, t in enumerate(targets, start=1):
         try:
             # 首先调用 _guard_path 进行初步检查（使用原始路径，但内部会 resolve）
@@ -430,6 +489,14 @@ def delete_targets(
                 freed += freed_here
                 audit(t.path, t.size, "compact", freed_here)
             elif t.kind is TargetKind.FILE:
+                # v0.9.10：以**删除前后实测差**计入 freed；目标若在扫描后已消失，
+                # 记 vanished 而不是"删除成功 + 释放 t.size"。
+                before = _path_size_now(t.path)
+                if before == 0 and not t.path.exists():
+                    vanished += 1
+                    audit(t.path, 0, "vanished", 0)
+                    on_progress(i, total, f"[跳过] {t.path}（目标已不存在，无需清理）")
+                    continue
                 _delete_path(
                     t.path,
                     mode,
@@ -440,11 +507,12 @@ def delete_targets(
                     shred_passes=shred_passes,
                 )
                 if recycle_mode:
-                    recycled += t.size
-                    audit(t.path, t.size, mode.value, 0)
+                    recycled += before
+                    audit(t.path, before, mode.value, 0)
                 else:
-                    freed += t.size
-                    audit(t.path, t.size, mode.value, t.size)
+                    freed_here = max(before - _path_size_now(t.path), 0)
+                    freed += freed_here
+                    audit(t.path, before, mode.value, freed_here)
             elif t.action is TargetAction.CLEAR:
                 # 清空目录内容（保留目录本身）
                 before = _dir_size_now(t.path)
@@ -473,6 +541,7 @@ def delete_targets(
                 if clear_failed:
                     skipped += 1
             else:  # DELETE directory
+                before = _dir_size_now(t.path)
                 _delete_path(
                     t.path,
                     mode,
@@ -483,15 +552,21 @@ def delete_targets(
                     shred_passes=shred_passes,
                 )
                 if recycle_mode:
-                    recycled += t.size
-                    audit(t.path, t.size, mode.value, 0)
+                    recycled += before
+                    audit(t.path, before, mode.value, 0)
                 else:
-                    freed += t.size
-                    audit(t.path, t.size, mode.value, t.size)
+                    freed_here = max(before - _dir_size_now(t.path), 0)
+                    freed += freed_here
+                    audit(t.path, before, mode.value, freed_here)
             deleted += 1
             on_progress(i, total, t.describe())
-        except (PermissionError, OSError, FileNotFoundError) as exc:
-            # 预期的权限/占用/不存在错误，跳过
+        except FileNotFoundError:
+            # 目标在扫描之后、删除之前消失了：无事可做，不算删除成功
+            vanished += 1
+            audit(t.path, 0, "vanished", 0)
+            on_progress(i, total, f"[跳过] {t.path}（目标已不存在，无需清理）")
+        except (PermissionError, OSError) as exc:
+            # 预期的权限/占用错误，跳过
             failed += 1
             on_progress(i, total, f"[跳过] {t.path} ({exc})")
         except Exception as exc:  # 非预期异常，记录日志
@@ -505,7 +580,24 @@ def delete_targets(
         "recycled": recycled,
         "skipped": skipped,
         "skipped_in_use": skipped_in_use,
+        "vanished": vanished,
     }
+
+
+def _path_size_now(path: Path) -> int:
+    """单个路径当前占用的字节数（文件取 st_size，目录取递归总和，读不到返回 0）。
+
+    v0.9.10：用于把 ``freed`` 从"扫描时的估计值"改为"删除前后实测差"，
+    并识别"扫描后已被外部删掉"的目标（见 ``delete_targets``）。
+    """
+    try:
+        if path.is_file():
+            return path.stat().st_size
+        if path.is_dir():
+            return _dir_size_now(path)
+    except OSError:
+        return 0
+    return 0
 
 
 def _dir_size_now(path: Path) -> int:

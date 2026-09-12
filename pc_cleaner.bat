@@ -33,12 +33,17 @@ if not defined PY (
 
 rem --- split launcher-only --no-pause from the args forwarded to Python ---
 rem v0.9.3: previously --no-pause was forwarded to Python -> "unrecognized arguments" + exit 2
+rem v0.9.10: keep the ORIGINAL quoting. `%~1` strips the surrounding quotes, so
+rem rebuilding with plain `%ARGS% %~1` turned a quoted path containing spaces
+rem ("D:\My Dir\scan.json") into two separate arguments. Re-adding the quotes and
+rem re-expanding %ARGS% (one extra parse pass) splits the string back into the
+rem original argument boundaries and forwards them intact.
 set "ARGS="
 set "NOPAUSE="
 :parse
 if "%~1"=="" goto parsed
 if /i "%~1"=="--no-pause" goto mark_nopause
-set "ARGS=%ARGS% %~1"
+set ARGS=%ARGS% "%~1"
 shift
 goto parse
 :mark_nopause

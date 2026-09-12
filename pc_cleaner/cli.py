@@ -108,6 +108,27 @@ def _parse_keys(raw: str) -> list[str]:
     ]
 
 
+def _recycle_bin_conflict(keys: list[str], excluded: set[str]) -> bool:
+    """``recycle_bin`` 是否同时被选中又被排除（v0.9.10）。
+
+    背景：``recycle_bin`` 不是 ``rules.json`` 里的分类，由引擎特殊处理，因此
+    原先它既不受 ``--exclude`` 的重叠校验约束，``empty_bin`` 的赋值又与
+    ``keys`` 的过滤结果彼此独立 —— ``--clean recycle_bin --exclude recycle_bin``
+    会**照常清空回收站**，用户明确写的"排除"被静默忽略（清空不可恢复）。
+    现在这种自相矛盾的输入一律拒绝执行。
+    """
+    return "recycle_bin" in {k.lower() for k in keys} and "recycle_bin" in {
+        k.lower() for k in excluded
+    }
+
+
+_RECYCLE_CONFLICT_MSG = (
+    "参数矛盾：recycle_bin 同时出现在要清理的分类和 --exclude 中。"
+    "清空回收站不可恢复，本工具不会靠猜测执行 —— 请二选一："
+    "要么去掉 --exclude recycle_bin，要么不要选中 recycle_bin。"
+)
+
+
 # ---------------------------------------------------------------------------
 # 命令行入口
 # ---------------------------------------------------------------------------
@@ -181,6 +202,9 @@ def _build_parser() -> argparse.ArgumentParser:
                            help="恢复最近一次「进回收站」的清理")
     mgmt_group.add_argument("--checkup", action="store_true",
                            help="一键体检：只读汇总各项状态")
+    mgmt_group.add_argument("--registry-scan", action="store_true",
+                           help="只读扫描注册表中的垃圾候选（卸载残留/MuiCache 孤儿/"
+                                "失效 App Paths）。**本工具不会删除任何注册表项**（v0.9.9）")
     mgmt_group.add_argument("--health", action="store_true",
                            help="只读体检报告（16 项：更新/安全启动/设备/磁盘/日志等，"
                                 "不修改任何设置）")
@@ -274,6 +298,9 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_history()
     if args.undo_last:
         return _cmd_undo_last()
+    # v0.9.9：注册表垃圾**只读**扫描（在任何扫描/删除流程之前处理）
+    if getattr(args, "registry_scan", False):
+        return _cmd_registry_scan(json_mode=bool(args.json))
 
     # 需管理员权限时经 UAC 提权重启（Windows）
     if args.admin and not is_admin():
@@ -284,6 +311,15 @@ def main(argv: list[str] | None = None) -> int:
     show_risky = args.risky or bool(cfg.get("show_risky", False))
     mode = _resolve_mode(args, cfg)
     excluded = set(_parse_keys(args.exclude)) if args.exclude else set()
+
+    # v0.9.10 安全闸门：显式要求「进回收站」但 send2trash 不可用时，直接在启动阶段
+    # 拒绝（退出码 1），而不是等到逐项删除时才全部失败（退出码 3 且要读完一屏
+    # 提示）。引擎层同样会拒绝，这里是更早、更清楚的反馈。
+    if mode is CleanMode.RECYCLE and not recycle_available():
+        _echo(red("请求「进回收站」但 send2trash 不可用（未安装或导入失败）。"))
+        _echo("  · 安装：pip install send2trash")
+        _echo("  · 或显式确认永久删除：加 --permanent（不可恢复，需 --risky 授权）")
+        return EXIT_ERROR
 
     # 排序方式：命令行优先，其次配置
     sort_by = args.sort or cfg.get("default_sort", "size_desc")
@@ -449,6 +485,10 @@ def main(argv: list[str] | None = None) -> int:
         empty_bin = bool(cfg.get("all_includes_recycle_bin", False)) and "recycle_bin" not in excluded
     else:
         keys = _parse_keys(args.clean)
+        # v0.9.10：recycle_bin 同时被选中又排除 → 拒绝（否则"排除"被静默忽略）
+        if _recycle_bin_conflict(keys, excluded):
+            _echo(red(_RECYCLE_CONFLICT_MSG))
+            return EXIT_ERROR
         # v0.9.4：--clean 给了但解析为空（如 --clean "" 或只有分隔符）→ 明确报错，
         # 此前会静默退化成"只扫描、exit 0"，自动化场景下看起来像"清理成功"。
         if not keys:
@@ -514,6 +554,34 @@ def main(argv: list[str] | None = None) -> int:
         allow_dangerous=bool(args.risky),
     )
     return exit_code_for(result)
+
+
+def _cmd_registry_scan(json_mode: bool = False) -> int:
+    """``--registry-scan``：注册表垃圾**只读**扫描（v0.9.9）。
+
+    - 只读（``KEY_READ``），**不提供任何删除入口**：删除注册表不释放磁盘空间，
+      而误删风险高，对普通用户是净负面（详见 :mod:`pc_cleaner.registry` 的设计说明）；
+    - 发现可疑项时退出码仍为 0（"有垃圾"不是错误），
+      只有扫描本身不可用（非 Windows）或发生异常才返回 1；
+    - ``--json`` 时输出带契约版本的信封，字段为 ``registry``。
+    """
+    try:
+        from .registry import scan_registry
+    except Exception as exc:  # noqa: BLE001
+        _echo(red(f"注册表扫描模块不可用: {exc}"))
+        return EXIT_ERROR
+    try:
+        report = scan_registry()
+    except Exception as exc:  # noqa: BLE001
+        _echo(red(f"注册表扫描失败: {exc}"))
+        return EXIT_ERROR
+    if json_mode:
+        payload = envelope("ok", EXIT_OK)
+        payload["registry"] = report.to_dict()
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        _echo(report.to_text())
+    return EXIT_OK
 
 
 def _cmd_health(json_mode: bool = False) -> int:
@@ -650,6 +718,26 @@ def _json_stdout_mode(
             keys = _parse_keys(args.clean)
         keys = [k for k in keys if k not in excluded]
 
+        # v0.9.10：recycle_bin 同为"选中"和"排除" → 参数矛盾，拒绝执行（不得靠
+        # 静默忽略 --exclude 去清空不可恢复的回收站）。注意 --all 分支下
+        # --exclude recycle_bin 只是"不要清空"，属正常用法，故只校验 --clean。
+        if _recycle_bin_conflict(_parse_keys(args.clean or ""), excluded):
+            payload["action"] = {
+                "not_executed": True,
+                "error": _RECYCLE_CONFLICT_MSG,
+                "known_categories": sorted({r.key.lower() for r in results}),
+            }
+            payload.update(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "ok": False,
+                    "status": "error",
+                    "exit_code": EXIT_ERROR,
+                }
+            )
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return EXIT_ERROR
+
         # v0.9.4：--clean 给了但解析为空 → 报错（不再静默退化成只扫描）
         if args.clean is not None and not keys and not args.all:
             payload["action"] = {
@@ -763,6 +851,7 @@ def _json_stdout_mode(
                     "failed": res["failed"],
                     "skipped": res.get("skipped", 0),
                     "skipped_in_use": res.get("skipped_in_use", 0),
+                    "vanished": res.get("vanished", 0),
                     "freed_bytes": res["freed"],
                     "recycled_bytes": res.get("recycled", 0),
                     "selected": keys,

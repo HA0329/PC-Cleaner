@@ -4,8 +4,15 @@
 只做一件事，便于维护与单独测试。
 
 安全增强（v0.8.1）：
-- `_relaunch_as_admin` 在提权前设置环境变量 `PC_CLEANER_ELEVATED=1`，
+- `_relaunch_as_admin` 让提权后的新进程带上 `PC_CLEANER_ELEVATED=1`，
   以便新进程检测到已提权状态，在菜单中显示 `[ADMIN]` 标识。
+
+v0.9.10 修复：
+- 提权标记改为**写进子进程命令行**（`cmd /c set VAR=1 && ...`）：
+  `ShellExecuteW` 不继承环境变量，此前在父进程里 `os.environ[...] = "1"`
+  是无效的，`ui.is_elevated()` 永远为 False；
+- 提权命令行的每个参数逐个转义，带空格的路径不再被拆散；
+- `--undo-last` 按实际恢复结果返回退出码（部分/全部失败 → 3）。
 """
 
 from __future__ import annotations
@@ -14,7 +21,6 @@ import json
 import shutil
 import sys
 import time
-import os  # 安全增强：用于设置环境变量
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +67,17 @@ def _cmd_history() -> int:
 
 
 def _cmd_undo_last() -> int:
-    """恢复最近一次「进回收站」的清理（--undo-last）。"""
+    """恢复最近一次「进回收站」的清理（--undo-last）。
+
+    退出码（v0.9.10 起如实上报，此前一律返回 0）：
+
+    - ``0``：全部目标都恢复成功；
+    - ``3``（``EXIT_DELETE_FAILED``）：部分恢复或一条都没恢复
+      （回收站里已无对应记录、原位置被新文件占用、恢复过程报错）；
+    - ``1``：不是「进回收站」的会话（永久删除不可撤销）、或非 Windows 平台。
+    """
+    from .service import EXIT_DELETE_FAILED
+
     sessions = load_history()
     if not sessions:
         _echo(yellow("暂无清理历史，无法撤销。"))
@@ -74,6 +90,9 @@ def _cmd_undo_last() -> int:
     if not targets:
         _echo(yellow("最近一次会话没有可恢复的文件目标。"))
         return 0
+    if sys.platform != "win32":
+        _echo(yellow("当前平台不是 Windows，回收站恢复不可用。"))
+        return 1
     _echo(
         bold(
             f"将尝试从回收站恢复 {len(targets)} 个目标"
@@ -86,6 +105,14 @@ def _cmd_undo_last() -> int:
     for s in res["skipped"]:
         _echo(f"  {yellow('✗')} 跳过: {s}")
     _echo(f"恢复成功 {len(res['restored'])} 项, 跳过 {len(res['skipped'])} 项。")
+    # v0.9.10：部分/全部失败必须用退出码体现，否则自动化脚本会把"恢复全部落空"
+    # 当成成功（历史里已登记、但回收站里其实没有对应记录是最常见的情形）。
+    if not res["restored"]:
+        _echo(yellow("没有恢复任何文件（回收站中可能已无对应记录）。"))
+        return EXIT_DELETE_FAILED
+    if res["skipped"]:
+        _echo(yellow("部分目标未能恢复，详见上面的跳过原因。"))
+        return EXIT_DELETE_FAILED
     return 0
 
 
@@ -297,6 +324,24 @@ def _cmd_checkup(
         last = sessions[-1]
         _echo(dim(f"    上次清理: {last.get('ts', '?')} 释放 {format_size(last.get('freed', 0))}"))
     _echo("")
+
+    # 注册表垃圾（v0.9.9：**只读**扫描，只给结论，不提供清理入口）
+    try:
+        from .registry import scan_registry
+
+        reg = scan_registry()
+        if not reg.available:
+            _echo(dim(f"  {bold('注册表垃圾')}  {reg.note}"))
+        elif reg.findings:
+            counts = reg.counts()
+            detail = "、".join(f"{k} {v} 条" for k, v in sorted(counts.items()))
+            _echo(f"  {bold('注册表垃圾')}  {yellow(str(len(reg.findings)))} 条可疑记录（{detail}）")
+            _echo(dim("    本工具不会删除注册表项，可用 --registry-scan 查看详情"))
+        else:
+            _echo(f"  {bold('注册表垃圾')}  {green('未发现证据充分的可疑记录')}")
+    except Exception as exc:  # noqa: BLE001 体检不应因注册表扫描失败而中断
+        _echo(dim(f"  {bold('注册表垃圾')}  （扫描失败，已跳过: {exc}）"))
+    _echo("")
     return 0
 
 
@@ -413,7 +458,13 @@ def _cmd_validate_rules(audit_local: bool = False) -> int:
         from .rules import validate_rules_detailed
 
         _errors, warnings = validate_rules_detailed(specs, audit_local=audit_local)
-    except Exception:  # noqa: BLE001 旧版 rules.py 无此 API 时静默跳过
+    except ImportError:
+        # 旧版 rules.py 没有该 API：静默跳过（保持向后兼容）
+        warnings = []
+    except Exception as exc:  # noqa: BLE001
+        # v0.9.10：审计本身出错不再吞掉 —— 以前任何异常都会被当成"没有警告"，
+        # 于是一次崩溃表现为"校验通过、零警告"，用户完全看不到问题。
+        _echo(yellow(f"⚠ 规则告警审计执行失败（不影响校验结果）: {exc!r}"))
         warnings = []
     if warnings:
         _echo(yellow(f"⚠ 规则警告：{len(warnings)} 条（不影响退出码）"))
@@ -475,27 +526,101 @@ def _cmd_export_scan(results, path: str) -> int:
 # ---------------------------------------------------------------------------
 # 提权重启（安全增强：设置环境变量标记）
 # ---------------------------------------------------------------------------
+#: 提权标记：子进程若带着它启动，说明自己是被 ``--admin`` 提权拉起来的。
+#: ``ShellExecuteW`` **不会继承父进程的环境变量**，所以父进程直接
+#: ``os.environ[...] = "1"`` 是无效的（v0.9.10 之前的实现就踩了这个坑：
+#: ``ui.is_elevated()`` 永远为 False，菜单里的 ``[ADMIN] / [UAC 提权]`` 从不显示）。
+#: 现在改为显式拼在提权命令行里（``cmd /c set VAR=1 && ...``），确定生效。
+ELEVATED_ENV_VAR = "PC_CLEANER_ELEVATED"
+ELEVATED_ENV_VALUE = "1"
+
+
+def _quote_arg(arg: str) -> str:
+    """把单个命令行参数转成可安全传给 ``ShellExecuteW`` 的形式。
+
+    v0.9.10：此前是裸的 ``" ".join(argv)``，带空格的参数（例如
+    ``--export-config "C:\\My Dir\\cfg.json"``）在提权后会被拆成两个参数，
+    新进程直接 argparse 报错。规则与 ``subprocess.list2cmdline`` 一致：
+    含空格/制表符/引号的参数用双引号包裹，内部的引号与反斜杠按 Windows
+    命令行解析规则转义；``.bat`` 目标另有额外转义。
+    """
+    if not arg:
+        return '""'
+    if not any(ch in arg for ch in ' \t\n\v"'):
+        return arg
+    out: list[str] = ['"']
+    backslashes = 0
+    for ch in arg:
+        if ch == "\\":
+            backslashes += 1
+            continue
+        if ch == '"':
+            # 引号前的反斜杠要翻倍，引号自身再转义
+            out.append("\\" * (backslashes * 2 + 1))
+            out.append('"')
+            backslashes = 0
+            continue
+        if backslashes:
+            out.append("\\" * backslashes)
+            backslashes = 0
+        out.append(ch)
+    # 结尾的反斜杠要翻倍，避免转义掉收尾的引号
+    out.append("\\" * (backslashes * 2))
+    out.append('"')
+    return "".join(out)
+
+
+def _elevated_command_line(argv: list[str], python: str, launcher: str) -> str:
+    """构造提权进程要执行的命令：``cmd /c set <标记> && <python> <launcher> <参数...>``。
+
+    - 标记通过 ``set`` 在**子进程自己的**环境里设置，因此
+      ``ui.is_elevated()`` 能真正读到（ShellExecuteW 不继承环境变量）；
+    - 每个参数都经 :func:`_quote_arg`，带空格的路径不再被拆散；
+    - ``launcher`` 可以是脚本路径，也可以是 ``-m pc_cleaner`` 这类**已拼好的
+      两段式参数**（此时原样附加，不再加引号）。
+    """
+    parts = [
+        "cmd",
+        "/c",
+        "set",
+        f"{ELEVATED_ENV_VAR}={ELEVATED_ENV_VALUE}",
+        "&&",
+        _quote_arg(python),
+    ]
+    if launcher.strip() == "-m pc_cleaner":
+        parts.append("-m")
+        parts.append("pc_cleaner")
+    else:
+        parts.append(_quote_arg(launcher))
+    parts.extend(_quote_arg(a) for a in argv)
+    return " ".join(parts)
+
+
 def _relaunch_as_admin(argv: list[str]) -> int:
     """通过 UAC 以管理员身份重新启动（Windows）。
 
     安全增强：
-    - 在提权前设置环境变量 `PC_CLEANER_ELEVATED=1`，新进程可检测到已提权状态。
-    - 移除 `--admin` 参数，防止无限循环。
+    - 提权后的进程带 ``PC_CLEANER_ELEVATED=1``（经 ``cmd /c set`` 注入，
+      不依赖环境变量继承），``ui.is_elevated()`` 因此能正确识别；
+    - 移除 ``--admin`` 参数，防止无限循环；
+    - 所有参数逐个转义（v0.9.10），带空格的路径不再被拆散。
     """
     import ctypes
 
     # 移除 --admin 避免死循环
-    new_argv = [a for a in argv if a != "--admin"]
-    params = f"-m pc_cleaner {' '.join(new_argv)}".strip()
+    forwarded = [a for a in argv if a != "--admin"]
+    candidate = Path(__file__).resolve().parent.parent / "_launcher.py"
+    launcher = str(candidate) if candidate.is_file() else "-m pc_cleaner"
+    # ShellExecuteW 的 lpFile 取首个空白前的 token（即 "cmd"），其余作为
+    # lpParameters 原样转给 cmd.exe。这样带空格的 python 路径也能正确解析。
+    command_line = _elevated_command_line(forwarded, sys.executable, launcher)
     _echo(yellow("请求管理员权限（UAC），将重新启动..."))
 
-    # 安全增强：设置环境变量，标记当前已提权
-    os.environ["PC_CLEANER_ELEVATED"] = "1"
-
+    # 备注：父进程自己不需要设置环境变量（ShellExecuteW 不继承），标记由
+    # 子进程命令行中的 `cmd /c set ... &&` 注入。
     try:
-        # 使用 ShellExecuteW 以管理员身份运行
         result = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, params, None, 1
+            None, "runas", command_line, None, None, 1
         )
         if result <= 32:
             _echo(red("提权启动失败，请手动以管理员身份运行。"))

@@ -38,13 +38,14 @@
 | `scan` | 只扫描，未执行任何操作 |
 | `dry_run` | 预览模式，未执行 |
 | `deleted` | 已执行且全部成功 |
-| `partial` | 已执行但存在失败/跳过 |
+| `partial` | 已执行但存在失败/跳过；也用于（MCP）`undo` 部分恢复成功 |
 | `preview` | （MCP）`preview_delete` 的只读预览 |
 | `needs_confirmation` | 危险操作未获显式授权，**什么都没做** |
 | `needs_repreview` | （MCP）清单自预览以来已变化，拒绝执行 |
 | `cancelled` | 用户取消 |
 | `interrupted` | Ctrl+C 中断（已落盘历史） |
 | `restored` | （MCP）回收站恢复完成 |
+| `failed` | （MCP）`undo` 一条都没恢复（v0.9.10） |
 | `error` | 参数/分类/内部错误 |
 
 ### 退出码
@@ -68,6 +69,7 @@
 | `selected` | string[] | 实际选中的分类 key |
 | `deleted` / `failed` / `skipped` | int | 成功目标数 / 失败目标数 / 部分清理的目标数 |
 | `skipped_in_use` | int | 因被运行中进程占用而跳过的目标数（规则声明 `skip_if_in_use`） |
+| `vanished` | int | 扫描之后、删除之前**已不存在**、因而未执行删除的目标数（v0.9.10；不计入 `deleted`，也不计入 `freed_bytes`） |
 | `freed_bytes` | int | **真正释放**的字节（永久删除 / 清空 / 压缩） |
 | `recycled_bytes` | int | **移入回收站**的字节（清空回收站后才真正释放） |
 | `recycle_bin` | object | `empty_recycle_bin()` 的结果（`deleted`/`failed`/`freed`） |
@@ -120,7 +122,40 @@ python -m pc_cleaner --json --clean system_temp --yes             # 3) 执行（
 
 ---
 
-## 5. 校验示例（零依赖）
+## 5. `--registry-scan --json`（v0.9.9）
+
+```json
+{
+  "schema_version": 1, "ok": true, "status": "ok", "exit_code": 0,
+  "registry": {
+    "available": true,
+    "note": "本报告为只读扫描结果，本工具不会删除任何注册表项。",
+    "read_only": true,
+    "scanned": { "uninstall:HKLM": 58, "muicache:HKCU": 9, "app_paths:HKLM": 26 },
+    "counts": { "uninstall_orphan": 1 },
+    "total": 1,
+    "findings": [
+      { "kind": "uninstall_orphan", "severity": "medium",
+        "location": "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{...}",
+        "value_name": "UninstallString",
+        "detail": "Python 3.12.3 (64-bit)：程序已不存在",
+        "target": "C:\\Users\\...\\python-3.12.3-amd64.exe" }
+    ],
+    "skipped": []
+  }
+}
+```
+
+`kind` 取值：`uninstall_orphan`（卸载表残留）/ `muicache_orphan`（MuiCache 孤儿缓存）/
+`app_paths_orphan`（失效 App Paths）；`severity` 取值：`low` / `medium` / `info`。
+
+> **本工具不提供注册表清理能力**：`registry` 只报告，`read_only` 恒为 `true`。
+> 删除注册表项既不释放磁盘空间，误删风险又高，因此刻意不做（详见 SECURITY.md）。
+> 发现可疑项时退出码仍为 `0`（"有垃圾"不是错误）。
+
+---
+
+## 6. 校验示例（零依赖）
 
 ```python
 import json, subprocess, sys

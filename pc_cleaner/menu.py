@@ -798,6 +798,7 @@ def _run_clean_flow(
         "failed": 0,
         "skipped": 0,
         "skipped_in_use": 0,
+        "vanished": 0,
         "freed": 0,
         "recycled": 0,
         "empty_bin": empty_bin,
@@ -819,6 +820,7 @@ def _run_clean_flow(
             result["failed"] += res["failed"]
             result["skipped"] += res.get("skipped", 0)
             result["skipped_in_use"] += res.get("skipped_in_use", 0)
+            result["vanished"] += res.get("vanished", 0)
             result["freed"] += res["freed"]
             result["recycled"] += res.get("recycled", 0)
         # 清掉实时状态行（汇总由下面的"完成：…"统一输出）
@@ -881,6 +883,10 @@ def _run_clean_flow(
     if result.get("skipped_in_use"):
         in_use = result["skipped_in_use"]
         summary += f" {dim(f'（{in_use} 项目标因被运行中程序占用而跳过）')}"
+    if result.get("vanished"):
+        # v0.9.10：扫描后、删除前就已消失的目标如实报出，不再混进"删除 N 项"
+        gone = result["vanished"]
+        summary += f" {dim(f'（{gone} 项目标在扫描后已不存在，无需清理）')}"
     _echo(summary)
     _print_disk_free(selected)
     return result
@@ -973,8 +979,18 @@ def _interactive(
 
         # 只在需要时重扫（首次进入 / 用户按 x / 用户按 f 主动刷新）
         if refresh_requested:
+            # v0.9.9 修复：此前这里按 (specs, show_progress, scan_depth, workers)
+            # 的**错误顺序**传参，而函数签名是 (specs, scan_depth, workers,
+            # show_progress)，导致实际生效的是 ``scan_depth=True``（=1 层）、
+            # ``workers=20``（超出 16 上限）。后果：菜单里按 x/f 重扫后，
+            # find_dirs 类规则（__pycache__ / node_modules / Steam shadercache）
+            # 因遍历深度被夹到 1 层而**扫不到深层目标**。
+            # 现在改用关键字实参，杜绝再次错位。
             fresh, code = _scan_for_menu(
-                specs, show_progress, scan_depth, workers
+                specs,
+                scan_depth=scan_depth,
+                workers=workers,
+                show_progress=show_progress,
             )
             if fresh is None:      # Ctrl+C：已给出提示，直接退出菜单
                 return code

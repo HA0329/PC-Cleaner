@@ -70,7 +70,8 @@ jobs:
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             echo "::group::--- 失败详情（pytest.log 摘要） ---"
-            grep -nE "^(FAILED|ERROR)" pytest.log | head -50 || true
+            # 注意：pytest 的短摘要会把 FAILED/ERROR 行**缩进**，因此不能用 ^锚定
+            grep -nE "(FAILED|ERROR)" pytest.log | head -50 || true
             echo "---------- 尾部 80 行 ----------"
             tail -n 80 pytest.log || true
             echo "::endgroup::"

@@ -6,7 +6,7 @@
 > 两条主线：①"承诺与实现不一致"的地方全部对齐（README 说不会静默降级，代码其实会；
 > 配置说禁用了某分类，Agent 其实照样能删）；②报数与退出码如实
 > （删了多少、释放了多少、恢复到什么程度，都必须能对上）。
-> 全部修复都配了回归测试，测试数 298 → 349（含 51 个新守门用例）。
+> 全部修复都配了回归测试，测试数 298 → 352（含 54 个新守门用例）。
 
 ### 安全修复（重要）
 
@@ -95,6 +95,40 @@
   "Windows 之外平台可运行"，现在先判平台并给出可读提示（返回 1），并补了
   `--admin` 的端到端回归测试。
 
+### 跨平台修复（Linux CI 暴露）
+
+> 依据：GitHub Actions 的 ubuntu 矩阵日志（13 个失败全部集中在
+> `tests/test_v098_safety.py` 与 `tests/test_v099_features.py`）。
+> 结论：**其中 1 个是真实现缺陷，其余 12 个是"当初只在 Windows 上跑过"的测试
+> 用了 Windows 专有语义**。
+
+- **`display_width()` 不剥离 ANSI → 带色表格宽度算错（真缺陷）**
+  （`console.py`）：旧实现逐字符累加宽度，于是 `\x1b[1m  1.\x1b[0m` 里的
+  `\x1b[1m` 被当成 4 个可见列。Windows 上因 `enable_ansi()` 对非 TTY 返回 False
+  （CI 的 stdout 是管道）而侥幸没暴露；Linux 的 POSIX 分支**无条件返回 True**，
+  于是表格带色输出，边框 83 / 表头 92 / 数据行 93 各不相同 —— 80 列窗口里
+  菜单被折行撕碎，`TestSummaryTableGeometry` / `TestMenuFooterFitsTerminal`
+  全线失败。两处一起修：
+  * `display_width()` 先剥离 ANSI CSI 序列再计数（颜色码不占显示列，带色表格
+    从此与不带色同宽）；
+  * `enable_ansi()` 的 POSIX 分支也要求 stdout/stderr 都是 TTY —— 与 Windows
+    分支同一语义，管道/重定向/CI 输出纯文本（日志也更干净）。
+- **测试侧 12 处 Windows 专有语义**（不改产品行为，改为跨平台等价写法或按平台跳过）：
+  * `TestGuardProtectsInsideClearRoot`（3 个失败）：用字面 `C:\Windows\Temp\...`
+    驱动 `_guard_path`，考的是"白名单清空根内的受保护名也要拦"。POSIX 上
+    `%WINDIR%` 不存在，该路径既不在白名单根内、又整段命中保护名 `windows\temp`
+    → 一律被拒，"普通缓存内容应放行"必然失败（平台语义差异，无产品意义）→
+    整类标记为仅 Windows 运行；
+  * `test_restore_not_found_message_is_not_misleading`：`restore_paths` 在 POSIX
+    上直接返回"非 Windows 平台"，走不到"没有对应记录"这句文案 → 仅 Windows 运行；
+  * `test_relative_path_is_joined_and_normalised`：硬编码 `"..\\other\\app.exe"`，
+    而 POSIX 的 `os.path.normpath` 只认 `/` → 改用 `os.sep` 拼接（两个平台都真跑）；
+  * `test_offline_volume_is_not_broken` / `test_only_broken_targets_are_returned` /
+    `test_include_unavailable_opt_in`：硬编码 `Q:\x.exe` 表示"未挂载盘"。POSIX 上
+    没有盘符概念，`splitdrive` 返回空 → 被判成 `BROKEN` 而非 `UNAVAILABLE` →
+    新增 `_offline_volume_target()` helper，按平台给出等价目标
+    （Windows 用未挂载盘符，POSIX 用不存在的挂载点），**两个平台都保留真实断言**。
+
 ### 文档与仓库
 
 - README：分类数 29 → 30（补 `rdp_legacy_cache` 行）、`--deep` 会同时把遍历深度
@@ -108,14 +142,16 @@
 
 ### 测试
 
-- 新增 `tests/test_v0910_fixes.py`（51 个用例）：回收站不可用时的整批拒绝（文件与
+- 新增 `tests/test_v0910_fixes.py`（54 个用例）：回收站不可用时的整批拒绝（文件与
   清空目录两条路径）、`vanished` 不计入 `deleted`/`freed`、`freed` 实测差、
   recycle_bin 矛盾输入（CLI + `--json`）、MCP 的 `enabled_categories` 约束、
   MCP `undo` 三态、`--undo-last` 退出码、提权命令行转义与环境标记、
   `--admin` 在 POSIX 上不崩栈、`.bat` 参数引号（真的跑一遍 cmd 解析循环）、
-  glob 起点目录匹配、审计多候选路径与按 pattern 分组，以及文档口径与实现一致性
+  glob 起点目录匹配、审计多候选路径与按 pattern 分组、**颜色/显示宽度**
+  （``display_width`` 剥离 ANSI + 非 TTY 不出色 + 开色后表格仍等宽），
+  以及文档口径与实现一致性
   （分类数/规则数/版本号/README 表格/README 里的测试数自动对照 pytest 收集结果）。
-- 全套 **349 passed**（原 298 + 51）。
+- 全套 **352 passed**（原 298 + 54）。
 
 ## 0.9.9 (2026-09)
 

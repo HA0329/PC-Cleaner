@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unicodedata
 
@@ -32,11 +33,24 @@ _force_utf8_io()
 
 
 def enable_ansi() -> bool:
-    """尝试启用 ANSI 转义序列支持（Windows）。返回是否可用。"""
+    """尝试启用 ANSI 转义序列支持。返回是否可用。
+
+    v0.9.10 跨平台修复：**非 Windows 平台也必须看是否 TTY**。此前这里写成
+    ``if sys.platform != "win32": return True`` —— 无条件返回 True，于是
+    POSIX 上即使 stdout 是文件/管道（CI、重定向、`| tee`），输出里依然带着
+    ``\\x1b[1m`` 之类转义码。配合下面 ``display_width`` 的老实现（把转义码当
+    普通字符逐个数），表格宽度会算出 83/92/93 这种"每行都不一样"的结果，
+    菜单在 80 列窗口里会被折行撕碎。
+    现在与 Windows 分支语义一致：**只有 stdout/stderr 都是 TTY 时才启用颜色**；
+    非 TTY 一律输出纯文本（管道里的日志也更干净）。
+    """
+    try:
+        if not (sys.stdout.isatty() and sys.stderr.isatty()):
+            return False
+    except (AttributeError, ValueError, OSError):  # 流被替换/关闭时保守关闭颜色
+        return False
     if sys.platform != "win32":
         return True
-    if not (sys.stdout.isatty() and sys.stderr.isatty()):
-        return False
     try:
         import ctypes
 
@@ -54,8 +68,11 @@ def enable_ansi() -> bool:
 
 _ANSI = enable_ansi()
 
-# 终端宽度检测
+#: 终端宽度检测
 _TERMINAL_WIDTH: int | None = None
+
+#: 匹配 ANSI CSI 转义序列（SGR 颜色、清除行尾等）
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def get_terminal_width() -> int:
@@ -128,9 +145,18 @@ def bg_yellow(text: str) -> str:
 
 
 def display_width(text: str) -> int:
-    """按显示宽度计算字符串长度（东亚全角字符按 2 计）。"""
+    """按**终端显示宽度**计算字符串长度（东亚全角字符按 2 计）。
+
+    v0.9.10 跨平台修复：先剥离 ANSI 转义序列。此前直接逐字符累加，于是
+    ``\\x1b[1m  1.\\x1b[0m`` 这种带色单元格会把 ``\\x1b[1m`` 当成 4 个可见列，
+    边框（无色）/表头/数据行算出的宽度各不相同 —— 在 Windows 上因为
+    ``enable_ansi()`` 对非 TTY 返回 False 而侥幸没暴露，到 Linux（POSIX 分支
+    无条件返回 True）表格就"每行宽度都不一样"，80 列窗口里被折行撕碎。
+    颜色码不占显示列，因此必须先剔除再计数（带色表格因此与不带色同宽）。
+    """
+    plain = _ANSI_RE.sub("", text)
     return sum(
-        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text
+        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in plain
     )
 
 

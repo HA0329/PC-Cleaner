@@ -29,7 +29,13 @@ from pathlib import Path
 import pytest
 
 from pc_cleaner import cli, commands, engine, mcp, rules, scanner, ui
-from pc_cleaner.models import CleanMode, Target, TargetAction, TargetKind
+from pc_cleaner.models import (
+    CategoryResult,
+    CleanMode,
+    Target,
+    TargetAction,
+    TargetKind,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -277,6 +283,69 @@ class TestHonestAccounting:
         from pc_cleaner.service import ENVELOPE_SCHEMA
 
         assert "vanished" in ENVELOPE_SCHEMA["properties"]["action"]["properties"]
+
+
+# ===========================================================================
+# 4b. 颜色与显示宽度（Linux CI 上暴露的表格折行问题）
+# ===========================================================================
+class TestColorAndDisplayWidth:
+    """v0.9.10：``display_width`` 必须先剥离 ANSI；非 TTY 不得输出颜色。
+
+    回归背景：``enable_ansi()`` 在 POSIX 分支无条件返回 True，CI（stdout 是管道）
+    里表格仍带 ``\\x1b[1m``；而 ``display_width`` 把转义码当可见字符计数
+    （``\\x1b[1m`` 算 4 列），于是边框 83 / 表头 92 / 数据行 93 各不相同，
+    菜单在 80 列窗口里被折行撕碎。Windows 上因 ``enable_ansi()`` 对非 TTY 返回
+    False 而侥幸没暴露。
+    """
+
+    def test_display_width_ignores_ansi(self):
+        from pc_cleaner.console import display_width
+
+        plain = "  │    1. │ ● 系统临时文件 │"
+        colored = "\x1b[1m  │\x1b[0m \x1b[36m   1.\x1b[0m │ \x1b[33m●\x1b[0m 系统临时文件 │"
+        assert display_width(colored) == display_width(plain)
+        assert display_width("\x1b[0m\x1b[1m\x1b[36m") == 0
+
+    def test_ansi_disabled_when_not_a_tty(self, monkeypatch):
+        """非 TTY（管道/重定向/CI）不应启用颜色 —— 与 Windows 分支同一语义。"""
+        from pc_cleaner import console
+
+        class _NotATty(io.StringIO):
+            def isatty(self) -> bool:  # noqa: D102
+                return False
+
+        monkeypatch.setattr(console.sys, "stdout", _NotATty())
+        monkeypatch.setattr(console.sys, "stderr", _NotATty())
+        assert console.enable_ansi() is False
+
+    def test_table_rows_same_width_even_with_colors(self, monkeypatch):
+        """开色时表格每行显示宽度仍必须完全一致（CI 强制 _ANSI=True 的等价条件）。"""
+        from pc_cleaner import console, menu
+        from pc_cleaner.console import display_width
+
+        monkeypatch.setattr(console, "_ANSI", True)
+        monkeypatch.setattr(menu, "get_terminal_width", lambda: 80)
+        results = [
+            CategoryResult(
+                key="system_temp", label="系统临时文件", risk="safe", scanned=True,
+                targets=[Target(path=Path(r"C:\tmp\system_temp"), kind=TargetKind.DIR,
+                                action=TargetAction.CLEAR, category="system_temp",
+                                size=26_620_470, file_count=3, label="系统临时文件")],
+            ),
+            CategoryResult(
+                key="web_cache", label="浏览器/网页缓存", risk="safe", scanned=True,
+                targets=[Target(path=Path(r"C:\tmp\web_cache"), kind=TargetKind.DIR,
+                                action=TargetAction.CLEAR, category="web_cache",
+                                size=39_680_000, file_count=3, label="浏览器/网页缓存")],
+            ),
+        ]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            menu._print_summary_table(results, selectable=[0, 1])
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        widths = {display_width(ln) for ln in lines}
+        assert len(widths) == 1, f"开色后表格行宽不一致: {sorted(widths)}"
+        assert max(widths) <= 80, f"80 列窗口里放不下: {max(widths)}"
 
 
 # ===========================================================================

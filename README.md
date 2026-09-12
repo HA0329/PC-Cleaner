@@ -348,7 +348,7 @@ pc_cleaner/
 ├── ui.py / console.py     # 输出、确认、进度 / ANSI 颜色与 CJK 对齐
 ├── proc.py / config.py    # 进程占用检测 / 配置读写
 docs/                      # mcp.md、json-contract.md
-tests/                     # 349 个单元测试
+tests/                     # 352 个单元测试
 ```
 
 ---
@@ -357,7 +357,7 @@ tests/                     # 349 个单元测试
 
 ```bash
 pip install -e ".[dev]"
-pytest        # 349 passed（须在项目根目录运行，见上方提示）
+pytest        # 352 passed（须在项目根目录运行，见上方提示）
 ```
 
 CI 在 **Windows + Linux × Python 3.10/3.12/3.13** 矩阵上跑同一套

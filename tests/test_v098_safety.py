@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import io
+import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -56,6 +57,20 @@ def _mk_category(key: str, label: str, risk: str, size: int) -> CategoryResult:
 # ===========================================================================
 # P0-1：白名单清空根内的受保护名必须被拒绝
 # ===========================================================================
+#: 本类用 ``C:\Windows\Temp`` 这类**字面 Windows 路径**驱动 ``_guard_path``：
+#: Windows 上 ``%WINDIR%`` 真实存在 → 该路径落在白名单清空根内，考的是
+#: "白名单内混入的受保护名也要拦"。POSIX 上 ``%WINDIR%`` 根本不存在，
+#: ``C:\Windows\Temp`` 会被当成 `/home/.../C:\Windows\Temp` 这种单段怪路径，
+#: 既不在任何白名单根内、又命中组件级保护名 ``windows\temp`` → 一律被拒，
+#: 于是"普通缓存内容应放行"的用例必然失败（**是平台语义差异，不是缺陷**）。
+#: 该行为在 Linux CI 上没有任何可观察的产品意义，故仅在 Windows 上跑。
+_WINDOWS_ONLY = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="用例以 C:\\Windows\\... 字面路径驱动白名单判定，仅 Windows 有该语义",
+)
+
+
+@_WINDOWS_ONLY
 class TestGuardProtectsInsideClearRoot:
     """``_guard_path`` 对 clear root 之下的子项也必须跑 ``is_protected``。"""
 
@@ -170,8 +185,13 @@ class TestRestorePathCanonicalization:
         f.unlink()
         assert canon(hist_spelling) in by_orig
 
+    @_WINDOWS_ONLY
     def test_restore_not_found_message_is_not_misleading(self, monkeypatch) -> None:
-        """找不到记录时的文案不应断言"已被手动删除"（会诱导用户清空回收站）。"""
+        """找不到记录时的文案不应断言"已被手动删除"（会诱导用户清空回收站）。
+
+        仅 Windows：``restore_paths`` 在 POSIX 上直接返回"非 Windows 平台"
+        （回收站是 Windows 概念），走不到"没有对应记录"这条文案。
+        """
         monkeypatch.setattr(engine, "recycle_entries", lambda drives=None: [])
         res = engine.restore_paths([r"C:\definitely\not\in\recycle\bin\x.tmp"])
         assert res["restored"] == []

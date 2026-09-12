@@ -134,6 +134,20 @@ def _write_lnk(path: Path, **kwargs) -> Path:
     return path
 
 
+def _offline_volume_target() -> str:
+    """一个"所在卷当前不可用"的目标路径（跨平台等价写法）。
+
+    v0.9.10：原用例硬编码 ``Q:\\Tools\\x.exe``。Windows 上这表示"Q: 盘未挂载"，
+    正是要考的 ``V_UNAVAILABLE`` 分支；但 POSIX 上 ``Q:\\...`` 没有盘符概念，
+    ``os.path.splitdrive`` 返回空盘符 → ``_volume_root_available`` 直接 True →
+    被误判成 ``BROKEN``（Linux CI 因此必红）。这里按平台给出等价目标：
+    Windows 用未挂载盘符，POSIX 用不存在的挂载点（同样"卷不可用"）。
+    """
+    if sys.platform == "win32":
+        return r"Q:\Tools\x.exe"
+    return "/nonexistent-volume/Tools/x.exe"
+
+
 # ===========================================================================
 # 修复 1：菜单刷新扫描的参数不再错位
 # ===========================================================================
@@ -306,9 +320,13 @@ class TestShortcutParsing:
         assert info.force_no_link_info is True
 
     def test_relative_path_is_joined_and_normalised(self, tmp_path) -> None:
-        p = _write_lnk(tmp_path / "c.lnk", relative_path="..\\other\\app.exe")
+        # v0.9.10：用 os.sep 拼相对段 —— 旧写法硬编码 "..\\other\\app.exe"，
+        # 在 POSIX 上 os.path.normpath 只认 "/"，于是反斜杠被当成普通文件名字符，
+        # 期望值/实际值对不上（Windows 语义的用例，Linux CI 必红）。
+        rel = os.path.join("..", "other", "app.exe")
+        p = _write_lnk(tmp_path / "c.lnk", relative_path=rel)
         info = lnk.parse_shortcut(p)
-        expected = os.path.normpath(str(tmp_path / ".." / "other" / "app.exe"))
+        expected = os.path.normpath(os.path.join(str(tmp_path), "..", "other", "app.exe"))
         assert info.target == expected
         assert ".." not in info.target, "相对段必须被折叠"
 
@@ -345,7 +363,7 @@ class TestShortcutVerdicts:
 
     def test_offline_volume_is_not_broken(self, tmp_path) -> None:
         """未挂载盘上的目标不能判成失效 —— 插上盘还能用。"""
-        p = _write_lnk(tmp_path / "offline.lnk", env_target=r"Q:\Tools\x.exe",
+        p = _write_lnk(tmp_path / "offline.lnk", env_target=_offline_volume_target(),
                        force_no_link_info=True)
         info = lnk.parse_shortcut(p)
         assert lnk.classify(info)[0] == lnk.V_UNAVAILABLE
@@ -382,7 +400,7 @@ class TestBrokenShortcutScanner:
         good.write_bytes(b"MZ")
         _write_lnk(tmp_path / "good.lnk", local_base_path=str(good))
         _write_lnk(tmp_path / "dead.lnk", local_base_path=str(tmp_path / "gone.exe"))
-        _write_lnk(tmp_path / "offline.lnk", env_target=r"Q:\x.exe",
+        _write_lnk(tmp_path / "offline.lnk", env_target=_offline_volume_target(),
                    force_no_link_info=True)
         (tmp_path / "placeholder.lnk").write_bytes(b"")
 
@@ -393,7 +411,7 @@ class TestBrokenShortcutScanner:
         assert "目标不存在" in targets[0].label
 
     def test_include_unavailable_opt_in(self, tmp_path) -> None:
-        _write_lnk(tmp_path / "offline.lnk", env_target=r"Q:\x.exe",
+        _write_lnk(tmp_path / "offline.lnk", env_target=_offline_volume_target(),
                    force_no_link_info=True)
         chk = scanner.make_protect_check()
         assert scanner._scan_broken_shortcuts(self._spec(tmp_path), "c", chk) == []

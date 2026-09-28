@@ -77,6 +77,20 @@ DEFAULT_PROTECTED_PATTERNS: list[str] = [
     r"weixin",
     r"weixinshuju",
     r"xwechat_files",
+    # v0.9.11：补齐被漏掉的即时通讯数据目录名。
+    # ``Documents/WeChat Files`` 是微信 3.x 的**默认聊天数据目录**，
+    # rules.json 的 wechat_cache 分类说明里已明确写着「微信 3.x 数据目录
+    # （Documents/WeChat Files）已从规则中移除，不再列入清理范围」——
+    # 但这条决定只落在"规则里不写它"，没有落进这份保护名单，
+    # 于是保护网对最常见的微信数据目录名是空的：实测
+    # make_protect_check()(C:\Users\X\Documents\WeChat Files\a\b) 返回 False。
+    # 一旦以后有人加了一条 base 覆盖 Documents 的规则（或用户自定义规则），
+    # 「微信数据绝不删除」这条承诺就会被无声推翻。
+    # 注意：只按**整体目录名**匹配，绝不写成子串 "wechat"——
+    # 否则 %APPDATA%\Tencent\WeChat\Logs / Temp 也会被保护，
+    # 而它们正是 rules.json 里有意清理的可重建内容。
+    r"wechat files",
+    r"tencent files",  # QQ 聊天数据（Documents/Tencent Files），同类用户数据
     # 开发工具相关
     r"\.git",
     r"\.venv",
@@ -99,6 +113,8 @@ DEFAULT_SKIP_DIRNAMES: set[str] = {
     ".idea",
     ".vscode",
     "xwechat_files",    # 微信数据，遍历时跳过
+    "wechat files",     # 微信 3.x 数据目录，遍历时跳过（v0.9.11）
+    "tencent files",    # QQ 数据目录，遍历时跳过（v0.9.11）
     "weixinshuju",
     "windows.old",      # 功能更新残留，体积巨大且需单独处理
     "winsxs",           # 组件库，只允许系统工具（DISM）处理

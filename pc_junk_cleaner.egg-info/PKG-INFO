@@ -1,3 +1,29 @@
+Metadata-Version: 2.4
+Name: pc-junk-cleaner
+Version: 0.9.10
+Summary: 为个人电脑定制的安全垃圾清理工具 (Windows 优先)
+Author: you
+License: MIT
+Keywords: cleaner,junk,cache,windows,pc,garbage,maintenance
+Classifier: Development Status :: 4 - Beta
+Classifier: Environment :: Console
+Classifier: Operating System :: Microsoft :: Windows
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: System :: Systems Administration
+Classifier: Topic :: Utilities
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: send2trash>=1.8
+Provides-Extra: recycle
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
+Provides-Extra: all
+Requires-Dist: pytest>=7; extra == "all"
+Dynamic: license-file
+
 # 🧹 PC Junk Cleaner
 
 > 为**个人电脑**定制的安全垃圾清理工具（**只适配 Windows**）。
@@ -11,7 +37,7 @@ python -m pc_cleaner --list      # 先看能清多少（不删任何东西）
 python -m pc_cleaner             # 进入交互式菜单
 ```
 
-**当前版本 0.9.11**（版本演进与每处修改的来龙去脉见 [CHANGELOG.md](CHANGELOG.md)）。
+**当前版本 0.9.10**（版本演进与每处修改的来龙去脉见 [CHANGELOG.md](CHANGELOG.md)）。
 
 ---
 
@@ -358,7 +384,7 @@ pc_cleaner/
 ├── ui.py / console.py     # 输出、确认、进度 / ANSI 颜色与 CJK 对齐
 ├── proc.py / config.py    # 进程占用检测 / 配置读写
 docs/                      # mcp.md、json-contract.md
-tests/                     # 378 个单元测试
+tests/                     # 357 个单元测试
 ```
 
 ---
@@ -367,14 +393,11 @@ tests/                     # 378 个单元测试
 
 ```bash
 pip install -e ".[dev]"
-pytest        # 378 passed（须在项目根目录运行，见上方提示）
+pytest        # 357 passed（须在项目根目录运行，见上方提示）
 ```
 
-CI 在 **Windows × Python 3.12** 上跑同一套（v0.9.11 修正：此前这里写的是
-"Windows + Linux × Python 3.12"，但 `.github/workflows/ci.yml` 自 v0.9.10 起
-矩阵就只有 `windows-latest` —— 本工具只适配 Windows，清理规则路径、回收站、
-注册表扫描、UAC 提权全是 Windows 专属语义）。
-各测试文件的覆盖点见 [CHANGELOG.md](CHANGELOG.md)。
+CI 在 **Windows + Linux × Python 3.12** 矩阵上跑同一套
+（Linux 上 Windows 专属用例由 `skipif` 跳过）。各测试文件的覆盖点见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

@@ -1,0 +1,9 @@
+send2trash>=1.8
+
+[all]
+pytest>=7
+
+[dev]
+pytest>=7
+
+[recycle]

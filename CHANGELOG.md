@@ -1,5 +1,138 @@
 # Changelog
 
+## 0.9.11 (2026-09)
+
+> 主题：**一次针对"承诺与实现是否真的一致"的外部复核 + 6 处修复**。
+> 全部结论都来自对**真实机器**的实测（真实回收站记录、真实 junction、真实全盘扫描），
+> 而不是读代码推断。测试数 357 → 378。
+
+### 安全修复（重要）
+
+- **文件名含孤立代理对时：文件被删掉、撤销记录却写不进去**（`history.py`）。
+  这是本次复核发现的**最严重**问题 —— 它直接破坏"留痕可撤销"这条产品底线。
+  Windows 文件名是任意 UTF-16，**未配对的代理码元是合法文件名**（Python 用
+  ``\udXXX`` 表示），不是理论边界。实测（沙箱内构造
+  ``cache\udfffentry.tmp``，走真实 CLI）：
+
+  ```
+  $ python -m pc_cleaner --clean review_sur --yes
+  exit: 1
+  stderr: ERROR - 删除目标 ...cache?entry.tmp 时发生非预期异常: 'utf-8' codec
+          can't encode character '\udfff' in position 146: surrogates not allowed
+  sandbox now: []                      <- 文件已经真的被删掉了
+  audit.log size: 0
+  history.json: MISSING (undo-last cannot recover)
+  config dir: [... , 'history.json.tmp-27456', 'history.json.tmp-21704']
+  ```
+
+  三重危害：
+  1. **不可恢复**：``history.json`` 根本没写出来 → ``--undo-last`` 永远找不回
+     （``--permanent`` 下更是彻底丢失）；
+  2. **误报**：异常抛在 ``os.replace`` 之前并上抛到 ``engine.delete_targets`` 的
+     兜底 ``except Exception``，于是**已经删掉**的目标被计入 ``failed``、
+     ``deleted`` 不计数；
+  3. **残留垃圾**：``history.json.tmp-<pid>`` 留在配置目录里（上面的实测输出可见
+     两次运行各留一个）。
+
+  根因是两处"只捕获 ``OSError``"：``save_history`` 的
+  ``write_text(encoding="utf-8")`` 与 ``record_deletion_audit`` 的
+  ``open(..., encoding="utf-8")`` 都会抛 ``UnicodeEncodeError``，而它是
+  ``ValueError`` 子类、**不是 ``OSError``**，因此穿透了 ``except OSError: pass``。
+  ``record_deletion_audit`` 的 docstring 本来就写着"尽力而为，失败不报错"，
+  实现与承诺不符。
+
+  修复：两处统一改用 ``errors="backslashreplace"``，把无法编码的代理码元写成
+  **JSON 合法**的 ``\udfff`` 转义（实测逐字符无损往返，``load_history`` 的 utf-8
+  读取不受影响，中文等正常文本仍按 ``ensure_ascii=False`` 原样输出、可读性不变）；
+  ``save_history`` 失败时清理临时文件，并把异常范围按既有"尽力而为"契约放宽 ——
+  **持久化失败绝不能中断删除流程或污染删除计数**。
+  修复后同一脚本：``exit: 0``、``audit.log size: 167``、``history.json: saved``。
+
+- **补齐即时通讯数据目录的保护网**（`rules.py`）：`Documents/WeChat Files` 是
+  微信 3.x 的**默认聊天数据目录**，`rules.json` 的 `wechat_cache` 说明里已经明确写着
+  「微信 3.x 数据目录（Documents/WeChat Files）已从规则中移除，不再列入清理范围」，
+  但这条决定**只落在"规则里不写它"，没有落进保护名单**（`DEFAULT_PROTECTED_PATTERNS`
+  里只有 `weixin` / `weixinshuju` / `xwechat_files`）。实测：
+
+  ```python
+  >>> from pc_cleaner.scanner import make_protect_check
+  >>> make_protect_check()(Path(r"C:\Users\X\Documents\WeChat Files\a\b"))
+  False        # 应有保护，实际没有
+  ```
+
+  后果：保护网存在的意义正是"兜住扫描器漏判/规则被改宽"，而它对最常见的微信数据
+  目录名是空的 —— 一旦以后新增一条 base 覆盖 `Documents` 的规则（或用户自定义规则），
+  「微信数据绝不删除」这条承诺会被无声推翻。现在补入 `wechat files` 与
+  `tencent files`（QQ 的 `Documents/Tencent Files`，同类聊天数据），并同步加入
+  `DEFAULT_SKIP_DIRNAMES`（与 `xwechat_files` / `weixinshuju` 的既有处理一致）。
+  **只按整体目录名匹配，绝不写成子串 `wechat`** —— 否则
+  `%APPDATA%\Tencent\WeChat\Logs` / `Temp` 也会被保护，而它们正是 `rules.json`
+  里有心清理的可重建内容。已加回归测试同时守住这两侧（补保护 + 不许过度封锁）。
+
+### 文档修正
+
+- **回收站 `$I` 记录的 offset 24 字段注释是错的**（`engine.py`）：原注释写作
+  「DWORD 目录记录长度（**仅当该记录是目录时非 0**）」。实测 8 条由 Windows 自己写出的
+  记录（`send2trash` 删除后直接读 `$Recycle.Bin/<SID>`）后确认：该字段是
+  **offset 28 起 UTF-16LE 的码元数，含结尾 NUL**，**文件记录与目录记录都非 0**，
+  值恒等于 `(len(data) - 28) // 2`。原始字节证据：
+
+  ```
+  offset 24:  57 00 00 00        -> 0x57 = 87
+  offset 28:  44 00 3a 00 5c 00  -> 'D',':','\'   （路径起点）
+  末尾:       ... \x00           （结尾 NUL）
+  ```
+
+  解析逻辑本身**一直是对的**（固定从 offset 28 读），但错误的注释会诱导后来者相信
+  "文件记录该字段为 0，可以从 offset 24 读路径"，从而亲手引入 `_parse_recycle_info`
+  开头警告的那个 bug（路径多出垃圾前缀 → `--undo-last` 全部落空 →
+  反过来误导用户去清空回收站，把本可恢复的数据真删掉）。
+- **README 的 CI 矩阵描述已过时**：写着「CI 在 Windows + Linux × Python 3.12 矩阵上跑
+  同一套」，但 `.github/workflows/ci.yml` 自 v0.9.10 起矩阵就只有 `windows-latest`
+  （该文件自己的注释写着「只跑 Windows」）。已改为与实际一致。
+
+### 测试
+
+- **两个"重解析点保护"用例不再被永久跳过**（`test_v092.py`）：此前只尝试
+  `os.symlink`，非管理员 / 未开开发者模式下必然失败 → `skip`。本机实测 3 个 skip 里
+  有 2 个来自这里，也就是说**最危险的那条防护（拒绝删除重解析点，否则会越界删掉
+  链接目标）在普通用户环境里从未被执行过**。现在回退到 junction（`mklink /J`，
+  普通用户即可创建，项目里 `test_v093_safety.py` 已用同一手法）：
+  junction 的 `st_file_attributes == 0x410`（含 `0x400` FILE_ATTRIBUTE_REPARSE_POINT），
+  与符号链接走**完全相同**的拒绝分支。
+  已做反向对照证明用例**不是空洞通过**：关掉 `is_reparse_point` 后，
+  `delete_targets` 会 `deleted=1 / freed=32` 并**真的删掉链接目标**；
+  防护开启时则是 `failed=1` 且目标与链接都完好。
+- **回收站夹具改为写真实字节布局**（`test_v092.py` / `test_v03.py`）：`$I` 夹具此前把
+  offset 24 写成 `32768 if is_dir else 0`（文件写 `0`），与 Windows 实际写出的内容不符。
+  用虚构值当夹具的后果是夹具无法再代表真实数据 —— 任何"文件记录该字段是 0，
+  可以改从 offset 24 读路径"的错误改动都不会被挡住。现在写入真实的路径码元数。
+- 新增 `tests/test_v0911_fixes.py`（21 个用例）：即时通讯数据目录保护/不误伤、
+  `$I` 真实布局（文件与目录两类记录）、offset 24 语义固化、"不得从 offset 24 读路径"
+  的守门断言；以及**孤立代理对文件名**的四条守门用例 —— 先断言"这个文件名真的能建出来"
+  （防止用例空转），再分别守住 `save_history` 无损往返、`record_deletion_audit`
+  不抛异常、以及端到端"删除后仍有可撤销记录、且不被误报为 failed"。
+
+### 复核结论（未发现问题，一并记录）
+
+以下部分经过实测复核，**确认实现正确、无需修改**，记录在此以免日后重复排查：
+
+- `--dry-run` 在任何情况下都不会删除：`cli.py` 在 dry-run 分支直接返回，从不进入
+  `delete_targets`。
+- `--all` 确实排除全部 `risk=risky` 分类（`downloads` / `dev_purge` / `browser_privacy` …）：
+  实测选中 24 个分类，`downloads` 不在其中；`--yes` 下危险操作仍需显式 `--risky`。
+- `make_protect_check` 的"白名单清空根 + 混入受保护名"逻辑正确：29 条必须保护的路径
+  全部命中，11 条正常缓存/临时路径全部放行，10 条必须拒绝的 `_guard_path` 全部拒绝。
+- `restore_paths()` 在**真实 Windows 回收站数据**上端到端可用：4 条探针（3 文件 + 1 目录）
+  全部恢复到原位、内容逐字节一致、对应 `$I` 元数据被清理、无孤立记录残留。
+- i18n 一致性：`en.json` 与 `zh_CN.json` 各 169 键完全相同，占位符逐键一致，
+  219 个 `t("key", ...)` 调用点的实参与其模板占位符**全部匹配**（无 `KeyError` 风险，
+  也无"用户看到裸 `{name}`"的情况）。
+- 代码中没有任何 `eval` / `exec` / `pickle` / `base64` 解码 / 网络请求，
+  没有 `shell=True`（`subprocess` 全部固定 argv）。
+- `ruff`（`F,E9,B,S102,S602,S605,S607`）只报出未使用导入、无占位符 f-string、
+  `raise ... from` 等装饰性问题，**没有未定义名、没有可疑 shell 调用**。
+
 ## 0.9.10 (2026-09)
 
 > 主题：**一次针对真实机器的逐项复核 + 11 处修复**。

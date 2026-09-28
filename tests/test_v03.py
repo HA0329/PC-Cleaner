@@ -245,15 +245,18 @@ def test_history_append_and_last(tmp_path, monkeypatch):
 # 回收站恢复（借鉴 sifty 的 undo）
 # ---------------------------------------------------------------------------
 def _make_recycle_info(original: str, size: int) -> bytes:
+    payload = original.encode("utf-16-le") + b"\x00\x00"
     header = b"\x02\x00\x00\x00" + b"\x00" * 4
     return (
         header
         + size.to_bytes(8, "little")
         + b"\x00" * 8
-        + b"\x00" * 4  # 目录记录长度（文件记录为 0；v0.9.5：此前缺失该字段，
-        #              # 解析器按真实格式从 offset 28 读路径时会多跳 4 字节）
-        + original.encode("utf-16-le")
-        + b"\x00\x00"
+        # v0.9.11：offset 24 的 DWORD 是「路径码元数（含结尾 NUL）」，
+        # 真实 Windows 记录**文件与目录都一样非 0**（实测 8 条）。
+        # 此前写死 0，只是"恰好不影响解析"（解析固定从 offset 28 读），
+        # 但夹具因此不再代表真实数据。这里改为写入真实值。
+        + (len(payload) // 2).to_bytes(4, "little")
+        + payload
     )
 
 

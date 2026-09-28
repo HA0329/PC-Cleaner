@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -432,15 +433,46 @@ def test_delete_targets_partial_clear_reports_skipped(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # 7. 重解析点保护
 # ---------------------------------------------------------------------------
+def _make_dir_reparse_point(link: Path, target: Path) -> str:
+    """把 ``link`` 造成指向目录 ``target`` 的重解析点，返回实际用到的类型名。
+
+    v0.9.11：此前这两个用例只尝试 ``os.symlink``，非管理员 / 未开开发者模式下
+    必然失败 → 直接 ``skip``。结果是**最危险的那条防护（拒绝删除重解析点，
+    否则会越界删掉链接目标）在普通用户环境里从未被执行过**，本机实测 3 个
+    skip 中有 2 个来自这里。
+
+    ``os.symlink`` 不可用时回退到 junction（``mklink /J``，普通用户即可创建，
+    项目里 ``test_v093_safety.py`` 已用同一手法）。两者都是重解析点，
+    ``scanner.is_reparse_point`` 与 ``engine._delete_path`` 的拒绝分支完全相同
+    （本机实测 junction 的 ``st_file_attributes == 0x410``，含 0x400
+    FILE_ATTRIBUTE_REPARSE_POINT；注意 ``os.path.islink()`` 对 junction 返回
+    False，所以判别只能靠 st_file_attributes），因此回退不会削弱用例要守的性质。
+
+    两者都建不出来才 skip。
+    """
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return "symlink"
+    except (OSError, NotImplementedError):
+        pass
+    try:
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("当前环境既不能创建符号链接，也不能创建 junction")
+    return "junction"
+
+
 def test_is_reparse_point_detects_symlink(tmp_path):
     target = tmp_path / "real"
     target.mkdir()
     link = tmp_path / "link"
-    try:
-        link.symlink_to(target, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("当前环境不支持创建符号链接")
-    assert is_reparse_point(link) is True
+    kind = _make_dir_reparse_point(link, target)
+    assert is_reparse_point(link) is True, f"{kind} 必须被识别为重解析点"
     assert is_reparse_point(target) is False
 
 
@@ -448,10 +480,7 @@ def test_delete_targets_refuses_symlink(tmp_path):
     target = tmp_path / "real"
     _write(target / "data.bin", 10)
     link = tmp_path / "link"
-    try:
-        link.symlink_to(target, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("当前环境不支持创建符号链接")
+    _make_dir_reparse_point(link, target)
 
     t = Target(
         path=link,
@@ -630,13 +659,26 @@ def test_all_does_not_empty_recycle_bin_by_default(monkeypatch, tmp_path, capsys
 # 11. 回收站 $I 解析与恢复（修复 --undo-last 永远匹配不上）
 # ---------------------------------------------------------------------------
 def _mk_recycle_info(info_path: Path, original: str, size: int, is_dir: bool) -> None:
-    """按 Windows 真实布局写一个 $I 元数据文件。"""
+    """按 Windows 真实布局写一个 $I 元数据文件。
+
+    v0.9.11：offset 24 的 DWORD 改为写**真实值**。
+    此前写的是 ``32768 if is_dir else 0``，与 Windows 实际写出的内容不符 ——
+    实测（8 条真实记录，见 ``engine._parse_recycle_info`` 的说明）该字段是
+    "offset 28 起 UTF-16LE 的码元数，含结尾 NUL"，**文件记录与目录记录都非 0**。
+    用虚构值当夹具的后果：夹具无法再代表真实数据，任何"文件记录该字段是 0，
+    可以改从 offset 24 读路径"的错误改动都不会被这组测试挡住。
+
+    ``is_dir`` 仍保留在签名里表达用例意图，但它不再影响该字段的取值 ——
+    这正是要固化下来的事实。
+    """
+    payload = original.encode("utf-16-le") + b"\x00\x00"
     data = bytearray()
     data += b"\x02\x00\x00\x00\x00\x00\x00\x00"        # 8 字节头
     data += int(size).to_bytes(8, "little")             # 文件大小
     data += (132000000000000000).to_bytes(8, "little")  # 删除时间(FILETIME)
-    data += (32768 if is_dir else 0).to_bytes(4, "little")  # 目录记录长度
-    data += original.encode("utf-16-le") + b"\x00\x00"
+    # 路径码元数（含结尾 NUL）——与真实 Windows 记录一致，文件/目录都一样
+    data += (len(payload) // 2).to_bytes(4, "little")
+    data += payload
     info_path.write_bytes(bytes(data))
 
 

@@ -379,7 +379,11 @@ def _cmd_import_config(path: str) -> int:
         _echo(red("配置必须是 JSON 对象。"))
         return 1
     patch = {k: v for k, v in data.items() if k in DEFAULTS}
-    update_config(patch)
+    try:
+        update_config(patch)
+    except OSError as exc:
+        _echo(red(f"保存配置失败: {exc}"))
+        return 1
     _echo(green(f"已导入 {len(patch)} 个配置项: {', '.join(sorted(patch))}"))
     return 0
 

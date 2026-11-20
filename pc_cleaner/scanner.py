@@ -224,13 +224,12 @@ def _clear_root_components(target: str) -> list[str]:
     best: list[str] = []
     for root in roots:
         try:
+            expanded = _expand_vars_cross_platform(str(root))
+            if os.sep == "/":
+                expanded = expanded.replace("\\", "/")
             r = os.path.normcase(
                 _strip_trailing(
-                    os.path.normpath(
-                        os.path.abspath(
-                            os.path.expandvars(os.path.expanduser(str(root)))
-                        )
-                    )
+                    os.path.normpath(os.path.abspath(expanded))
                 )
             )
         except (OSError, ValueError):

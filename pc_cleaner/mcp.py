@@ -13,7 +13,7 @@
    真正执行必须再用 ``delete(confirm_token)``。Agent 无法"一步删掉"。
 3. **清单漂移检测（防 TOCTOU）**：``delete`` 会**重新扫描并比对清单哈希**；
    自预览以来目标发生了变化就拒绝执行并返回 ``status="needs_repreview"``。
-4. **危险操作二次授权**：清单包含高风险分类 / 永久删除 / 清空回收站时，
+4. **危险操作二次授权**：清单包含高风险分类 / 永久删除时，
    ``delete`` 必须显式带 ``acknowledge_danger=true``（token 只保证"这是你预览过的那批"，
    不代替"你同意承担风险"）。
 5. **stdout 只承载协议**：所有人类可读输出走 stderr；本模块**绝不**调用 ``ui._echo``。
@@ -69,7 +69,7 @@ SCHEMA_VERSION = 1
 _INSTRUCTIONS = (
     "PC-Cleaner 是 Windows 垃圾清理工具。安全流程：先调用 scan / preview_delete 查看清单，"
     "再决定是否用 confirm_token 执行 delete；preview_delete 不会删除任何东西。"
-    "若清单含高风险分类/永久删除/清空回收站，delete 还需 acknowledge_danger=true。"
+    "若清单含高风险分类/永久删除，delete 还需 acknowledge_danger=true。"
     "注册表相关只能用 registry_scan 查看（只读，本工具不清理注册表）。"
     "English: call scan/preview_delete first (read-only), then delete(confirm_token) to execute. "
     "Destructive manifests require acknowledge_danger=true. "

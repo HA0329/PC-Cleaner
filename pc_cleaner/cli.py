@@ -182,7 +182,7 @@ def _build_parser() -> argparse.ArgumentParser:
     clean_group.add_argument("--risky", action="store_true",
                             help="显示/允许高风险分类")
     clean_group.add_argument("--shred", action="store_true",
-                            help="永久删除前随机覆写文件内容一遍（隐私增强）")
+                            help="永久删除前随机覆写文件内容一遍（隐私增强；必须配合 --permanent）")
 
     # 高级清理（v0.6）
     adv_group = p.add_argument_group("高级清理")
@@ -275,7 +275,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.show_config:
-        path = save_config(load_config())
+        try:
+            path = save_config(load_config())
+        except OSError as exc:
+            _echo(red(f"保存配置失败: {exc}"))
+            return 1
         _echo(f"配置文件: {path}")
         _echo(json.dumps(load_config(), ensure_ascii=False, indent=2))
         return 0
@@ -852,7 +856,16 @@ def _json_stdout_mode(
             }
             status = "dry_run"
         elif args.yes:
-            if reasons and not args.risky:
+            if args.shred and mode is CleanMode.RECYCLE:
+                payload["action"] = {
+                    "not_executed": True,
+                    "needs_confirmation": True,
+                    "reason": "--shred 需要 --permanent（回收站模式不会覆写）",
+                    "selected": keys,
+                }
+                exit_code = EXIT_NEEDS_CONFIRM
+                status = "needs_confirmation"
+            elif reasons and not args.risky:
                 # v0.9.3 安全闸门：非交互自动化下，危险操作必须显式 --risky 授权
                 payload["action"] = {
                     "not_executed": True,

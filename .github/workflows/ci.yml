@@ -89,18 +89,20 @@ jobs:
             python -VV || true
             python -c "import sys,tempfile,platform;print('sys.platform:',sys.platform);print('tempdir:',tempfile.gettempdir());print('platform:',platform.platform())" || true
             python -m pip --version || true
-            python -m pip list 2>/dev/null | grep -iE "send2trash|pytest|ruff|mypy|pip|setuptools" || true
+            python -m pip list 2>/dev/null | grep -iE "send2trash|psutil|pytest|ruff|mypy|pip|setuptools" || true
             echo "::endgroup::"
           fi
           exit "$status"
 
-      # 下面几步是"信号"而不是"闸门"：任何一步失败都要继续跑完，
-      # 否则第一步失败会把后面的诊断信息全部吞掉（用 --force-exit 在最后统一判定）。
+      # 下面几步先收集全部诊断（continue-on-error），再由最后一步统一判定；
+      # 版本冒烟和规则校验也必须进入闸门，不能只打印结果就放过。
       - name: Version smoke test
+        id: version_smoke
         continue-on-error: true
         run: python -m pc_cleaner --version
 
       - name: Validate rules.json
+        id: validate_rules
         continue-on-error: true
         run: python -m pc_cleaner --validate-rules
 
@@ -117,8 +119,10 @@ jobs:
         # 汇总上面几步（以及测试）的结果：任何一步失败，本任务整体失败。
         # 这样既能拿到全部诊断输出，又不会把"失败"悄悄变成"通过"。
         run: |
-          echo "pytest=${{ steps.pytest.outcome }} health_smoke=${{ steps.health_smoke.outcome }}"
+          echo "pytest=${{ steps.pytest.outcome }} version=${{ steps.version_smoke.outcome }} rules=${{ steps.validate_rules.outcome }} health_smoke=${{ steps.health_smoke.outcome }}"
           if [ "${{ steps.pytest.outcome }}" != "success" ] || \
+             [ "${{ steps.version_smoke.outcome }}" != "success" ] || \
+             [ "${{ steps.validate_rules.outcome }}" != "success" ] || \
              [ "${{ steps.health_smoke.outcome }}" != "success" ]; then
             echo "::error::CI 有步骤失败（详见上面各步骤输出）"
             exit 1

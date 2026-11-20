@@ -9,9 +9,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("pc_cleaner.config")
+if not logger.handlers:
+    logger.addHandler(logging.NullHandler())
 
 
 def config_dir() -> Path:
@@ -79,36 +85,61 @@ def resolve_workers(cfg: dict[str, Any] | None = None) -> int:
     return max(1, min(raw, 16))
 
 
+def _backup_corrupt_config(path: Path) -> Path | None:
+    """把损坏的配置移到同目录备份文件；失败返回 None（不阻断启动）。"""
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    backup = path.with_name(f"{path.name}.corrupt-{stamp}-{os.getpid()}")
+    try:
+        path.replace(backup)
+    except OSError:
+        logger.exception("配置损坏且无法备份: %s", path)
+        return None
+    logger.warning("配置损坏，已备份到 %s 并回退默认值", backup)
+    return backup
+
+
 def load_config() -> dict[str, Any]:
-    """读取配置；文件不存在或损坏时返回默认值。"""
+    """读取配置；文件不存在返回默认值，损坏时备份后回退默认值。"""
     cfg = dict(DEFAULTS)
     path = config_path()
+    if not path.exists():
+        return cfg
     try:
-        if path.exists():
-            with path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                cfg.update(data)
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        pass
+        _backup_corrupt_config(path)
+        return cfg
+    if isinstance(data, dict):
+        cfg.update(data)
     return cfg
 
 
 def save_config(cfg: dict[str, Any]) -> Path:
-    """保存配置，返回保存的路径。"""
+    """原子保存配置，返回保存的路径。
+
+    v0.9.19：先写同目录临时文件并 ``fsync``，再用 ``os.replace`` 原子替换；
+    写入失败会抛出 ``OSError``，不再静默返回一个“看起来保存成功”的路径。
+    """
     d = config_dir()
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    d.mkdir(parents=True, exist_ok=True)
     # 只保留已知配置字段，避免写入额外噪声
     clean = {k: cfg.get(k, DEFAULTS[k]) for k in DEFAULTS}
     path = config_path()
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     try:
-        with path.open("w", encoding="utf-8") as f:
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     except OSError:
-        pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        logger.exception("保存配置失败: %s", path)
+        raise
     return path
 
 

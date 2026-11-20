@@ -8,14 +8,13 @@
 直接删除会破坏正在运行的程序，所以清理前必须先做一次「只读占用检测」，
 本模块就是这一步的唯一实现（不删除、不写文件、不改注册表）。
 
-零依赖策略
+依赖策略
 ----------
-- 必需依赖：仅标准库（``os`` / ``sys`` / ``json`` / ``time`` / ``shutil`` /
-  ``subprocess`` / ``logging``），因此没有 psutil 也能完整工作。
-- 可选加速：``psutil`` 存在时用它批量取进程 exe / cmdline，并额外检查
-  ``open_files()``（能抓到「文件被打开但命令行里没有该路径」的情况）；
-  没有 psutil 时自动回退到一次 ``powershell.exe`` 批量查询
-  （``Get-CimInstance Win32_Process`` + ``ConvertTo-Json``）。
+- 默认安装要求 ``psutil``（v0.9.19 起为必需依赖）：用它批量取进程 exe / cmdline，
+  并额外检查 ``open_files()``，能抓到「文件被打开但命令行里没有该路径」的情况。
+- 若运行环境导入 psutil 失败，仍自动回退到一次 ``powershell.exe`` 批量查询
+  （``Get-CimInstance Win32_Process`` + ``ConvertTo-Json``），保证工具不因
+  单一依赖损坏而完全失去占用检测。
 - 非 Windows（``sys.platform != "win32"``）：所有函数返回空结果，不抛异常。
 
 缓存策略
@@ -53,7 +52,7 @@ if not logger.handlers:
     logger.addHandler(logging.NullHandler())
 
 # ===========================================================================
-# 可选依赖：psutil（缺失则走 PowerShell 回退）
+# 默认依赖：psutil（导入失败则走 PowerShell 回退）
 # ===========================================================================
 _psutil: Any = None
 try:  # 可选加速，不是必需依赖

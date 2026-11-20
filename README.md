@@ -1,8 +1,8 @@
 # 🧹 PC Junk Cleaner
 
 > **Windows-only** 的个人电脑安全垃圾清理工具：先扫描、再确认，默认进回收站，可撤销。
-> 当前版本 **0.9.18**（版本记录见 [CHANGELOG.md](CHANGELOG.md)）；内置 **34 个分类、301 条内置规则**
-> （34 分类 301 目标），其中 36 条深度规则。
+> 当前版本 **0.9.19**（版本记录见 [CHANGELOG.md](CHANGELOG.md)）；内置 **34 个分类、300 条内置规则**
+> （34 分类 300 目标），其中 36 条深度规则。
 
 ```powershell
 python -m pc_cleaner --list      # 只扫描，不删任何东西
@@ -20,7 +20,7 @@ python -m pc_cleaner             # 交互式菜单
 f-string 语法，3.10/3.11 会直接在解析阶段报错。
 
 ```powershell
-pip install -e .                          # 安装（send2trash 为必需依赖）
+pip install -e .                          # 安装（send2trash + psutil 为必需依赖）
 python -m pc_cleaner --list               # 扫描，不删除
 python -m pc_cleaner                      # 菜单；输入 p 一键推荐
 python -m pc_cleaner --health             # 只读体检（16 项）
@@ -75,14 +75,14 @@ python -m pc_cleaner --clean system_temp  # 清理指定分类（先预览再确
 | `dev_purge` | 🔴 | 散落 node_modules / dist / build / target / .next（默认隐藏） |
 | `browser_privacy` | 🔴 | Cookie 与浏览历史（默认隐藏，会退出登录） |
 | `browser_data` | 🔴 | 本地存储、会话、表单、登录密码、站点偏好（默认隐藏，会退出登录） |
-| `database_compact` | 🟢 | 浏览器 SQLite `VACUUM`（不删数据，体积按空闲页估算） |
+| `database_compact` | 🟡 | 浏览器 SQLite `VACUUM`（不删数据；浏览器运行时可能失败） |
 | `webview2_caches` | 🟡 | UWP/系统应用内嵌 WebView2 的图形/着色器/组件缓存 |
 | `hidden_installer_backups` | 🟡 | `$Windows.~BT` / `~WS` 升级残留（需管理员） |
 | `recycle_and_diagnostics` | 🟡 | ETL 诊断日志、WinSAT 缓存（需管理员） |
 | `cloud_app_hidden` | 🟢 | OneDrive 本地缓存、Windows Store 应用临时文件 |
-| `java_rdp_legacy` | 🟢 | Java 部署缓存、远程桌面位图缓存、系统字体缓存 |
+| `java_rdp_legacy` | 🟢 | Java 部署缓存、远程桌面位图缓存（系统字体缓存见 `system_admin`） |
 | `rdp_legacy_cache` | 🟡 | 文档目录下远程桌面旧版剪贴板/位图缓存（不随 `--all`） |
-| `crash_telemetry` | 🟢 | 用户级 WER 错误报告、遥测存储（系统级见 `system_wer`） |
+| `crash_telemetry` | 🟢 | 用户级 WER 错误报告、临时转储（系统级见 `system_wer` / `system_admin`） |
 | `extreme_stealth` | 🟡 | CBS 历史日志、大体积事件日志、Steam/Epic 下载残留、音视频缓存 |
 | `broken_shortcuts` | 🔴 | 开始菜单/桌面/快速启动中的失效快捷方式（离线盘、网络共享、URL 不动） |
 | `usage_traces` | 🟡 | 最近文档、跳转列表、PowerShell 命令历史（不删用户文件） |
@@ -95,7 +95,7 @@ python -m pc_cleaner --clean system_temp  # 清理指定分类（先预览再确
 ## 🔒 安全边界
 
 1. **不确认不删**：默认先预览再确认；`--yes` 仅用于自动化，危险操作仍需显式授权。
-2. **回收站优先**：`send2trash` 是必需依赖；进回收站失败默认保留原文件，不会静默转永久删除。
+2. **回收站优先**：`send2trash` 和 `psutil` 是必需依赖；进回收站失败默认保留原文件，不会静默转永久删除。
 3. **高风险闸门**：永久删除、清空回收站、高风险分类在非交互环境必须带 `--risky`；
    否则返回 `needs_confirmation` + 退出码 4，什么都不删。
 4. **黑名单 + 二次防御**：`System32`、`WinSxS`、`DriverStore`、`Windows\Installer`、
@@ -122,7 +122,7 @@ python -m pc_cleaner --clean system_temp  # 清理指定分类（先预览再确
 | `--risky` | 显示高风险分类，并授权危险操作 |
 | `--yes` / `-y` | 跳过确认（谨慎；危险操作仍需 `--risky`） |
 | `--ext` / `--min-size-mb` / `--older-than-days` | 按扩展名 / 体积 / 修改时间过滤 |
-| `--shred` | 永久删除前随机覆写（`--shred-passes N`） |
+| `--shred` | 永久删除前随机覆写（必须配合 `--permanent`；`--shred-passes N`） |
 | `--health` / `--checkup` | 只读体检 / 清理前准备检查 |
 | `--registry-scan` | 注册表垃圾只读扫描，绝不删除 |
 | `--history` / `--undo-last` | 查看历史 / 从回收站恢复最近一次 |
@@ -200,7 +200,7 @@ python -m pc_cleaner --mcp --mcp-allow-delete    # 额外暴露 delete/undo
 ```
 pc_cleaner/   # cli、menu、scanner、engine、rules、lnk、registry、health、mcp、history...
 docs/         # json-contract.md、mcp.md、changelog-archive.md
-tests/                     # 418 个单元测试
+tests/                     # 429 个单元测试
 ```
 
 ---
@@ -211,10 +211,10 @@ tests/                     # 418 个单元测试
 pip install -e ".[dev]"
 python -m ruff check pc_cleaner tests   # 未使用导入 / 导入顺序 / 常见 bug
 python -m mypy                         # win32 平台，含未注解函数
-pytest        # 418 passed（须在项目根目录运行，见上方提示）
+pytest        # 429 passed（须在项目根目录运行，见上方提示）
 ```
 
-CI 在 Windows × Python 3.12 上运行 pytest、`ruff`、`mypy`、规则校验和 JSON 健康检查。
+CI 在 Windows × Python 3.12 上运行 pytest、`ruff`、`mypy`、版本/规则校验和 JSON 健康检查；版本或规则校验失败也会让任务变红。
 Linux 只用于静态检查和平台无关测试；Windows 路径语义用例以 Windows CI 为准。
 
 UI 输出全部走 stderr 的进度组件，避免污染 `--json` / MCP stdout；历史与审计使用原子写 +

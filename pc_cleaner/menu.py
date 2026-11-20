@@ -857,6 +857,17 @@ def _run_clean_flow(
       未授权且非交互（管道 / Agent 调用）时**直接拒绝**并返回
       ``{"needs_confirmation": True}``（退出码 4），不再依赖 stdin EOF 兜底。
     """
+    # v0.9.19：shred 必须先覆写再永久删除；默认回收站模式下它不会执行。
+    # 旧实现只在 PERMANENT 时打印提示，shred 被静默忽略；这里直接拒绝，避免
+    # 用户以为文件已被安全擦除，实际只是进了回收站。
+    if shred and not dry_run and mode is CleanMode.RECYCLE:
+        _echo(red("shred 需要永久删除（--permanent），当前是回收站模式，未执行任何删除。"))
+        _echo("  请改用 --permanent --shred，或去掉 --shred 走可恢复的回收站。")
+        return {
+            "needs_confirmation": True,
+            "reasons": ["--shred 需要 --permanent（回收站模式不会覆写）"],
+        }
+
     # 预览与删除使用同一份过滤结果，避免“预览了但没删/删了没预览”的偏差
     per_category: list[tuple[Any, list[Any]]] = []
     for res in selected:
@@ -1419,6 +1430,9 @@ def _interactive(
         # 重新扫描。此前无论取消还是完成，都只会问「是否继续扫描并清理其他内容？
         # [Y/n]」——默认 Yes，按回车就开始新一轮多分钟扫描，唯一的选择是退出程序，
         # 选错编号想反悔的代价极高。
+        if isinstance(flow_result, dict) and flow_result.get("needs_confirmation"):
+            _echo(yellow("  本次未执行删除：shred 需要配合 --permanent。"))
+            continue
         if isinstance(flow_result, dict) and flow_result.get("cancelled"):
             _echo(dim("  已取消，返回菜单（可按 f 重新扫描）。"))
             continue

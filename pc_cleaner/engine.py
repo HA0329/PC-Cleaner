@@ -55,6 +55,7 @@ from .models import CleanMode, Target, TargetAction, TargetKind, format_size
 from .rules import (
     SYSTEM_CRITICAL_FILES,  # 安全增强
     is_clear_root,
+    is_clear_under_protected,
 )
 
 # ===========================================================================
@@ -102,7 +103,13 @@ ProgressCB = Callable[[int, int, str], None]
 # ===========================================================================
 # 删除前的二次防御（安全增强）
 # ===========================================================================
-def _guard_path(path: Path, is_protected, action: TargetAction) -> None:
+def _guard_path(
+    path: Path,
+    is_protected,
+    action: TargetAction,
+    *,
+    allow_clear_under_protected: bool = False,
+) -> None:
     """删除前的二次防御：拒绝磁盘根路径、系统关键文件、受保护路径。
 
     安全增强：
@@ -114,6 +121,10 @@ def _guard_path(path: Path, is_protected, action: TargetAction) -> None:
         * DELETE 动作：仅当路径**恰好等于**某个白名单根目录时拒绝删除目录本身；
         * 白名单根之下的子项 = 「正在被清空的内容」，放行交给后续删除
           （否则 C:\\Windows\\Temp 等白名单目录会永远清不干净）。
+    - 受保护前缀下的清空白名单（ALLOWED_CLEAR_UNDER_PROTECTED）：
+        * DELETE 动作默认一律拒绝，包括清空根之下的子目录；
+        * 只有正在执行 CLEAR 的调用方显式传 ``allow_clear_under_protected=True``
+          才放行子项，避免正常清空 System32\\LogFiles 时被整体挡住。
     - 受保护路径匹配使用传入的 is_protected 函数。
     """
     # 1. 解析真实路径（防止 .. 和符号链接）；不要求路径存在，避免误伤
@@ -144,6 +155,14 @@ def _guard_path(path: Path, is_protected, action: TargetAction) -> None:
     # 只对真正混入的受保护名返回 True（拒绝），因此清空功能不受影响。
     if action is not TargetAction.CLEAR and is_clear_root(real):
         raise PermissionError(f"白名单目录只允许清空内容，拒绝删除整个目录: {real}")
+    if (
+        action is not TargetAction.CLEAR
+        and not allow_clear_under_protected
+        and is_clear_under_protected(real)
+    ):
+        raise PermissionError(
+            f"受保护清空目录只允许清空内容，拒绝删除目录/子项: {real}"
+        )
 
     # 5. 受保护路径检查
     if is_protected(real):
@@ -232,7 +251,12 @@ def _iter_files_no_links(root: Path) -> list[Path]:
     return files
 
 
-def _ensure_tree_safe(root: Path, is_protected) -> None:
+def _ensure_tree_safe(
+    root: Path,
+    is_protected,
+    *,
+    allow_clear_under_protected: bool = False,
+) -> None:
     """在递归删除**任何内容之前**检查整棵树。
 
     ``_clear_dir_content`` 只检查直接子项；如果缓存目录里有一个普通项目目录，
@@ -247,7 +271,12 @@ def _ensure_tree_safe(root: Path, is_protected) -> None:
         cur = stack.pop()
         if is_reparse_point(cur):
             raise PermissionError(f"目录包含符号链接/junction，拒绝递归删除: {cur}")
-        _guard_path(cur, is_protected, TargetAction.DELETE)
+        _guard_path(
+            cur,
+            is_protected,
+            TargetAction.DELETE,
+            allow_clear_under_protected=allow_clear_under_protected,
+        )
         try:
             children = list(cur.iterdir())
         except OSError:
@@ -255,7 +284,12 @@ def _ensure_tree_safe(root: Path, is_protected) -> None:
         for child in children:
             if is_reparse_point(child):
                 raise PermissionError(f"目录包含符号链接/junction，拒绝递归删除: {child}")
-            _guard_path(child, is_protected, TargetAction.DELETE)
+            _guard_path(
+                child,
+                is_protected,
+                TargetAction.DELETE,
+                allow_clear_under_protected=allow_clear_under_protected,
+            )
             try:
                 if child.is_dir():
                     stack.append(child)
@@ -263,7 +297,12 @@ def _ensure_tree_safe(root: Path, is_protected) -> None:
                 raise
 
 
-def _rmtree(path: Path, is_protected=None) -> None:
+def _rmtree(
+    path: Path,
+    is_protected=None,
+    *,
+    allow_clear_under_protected: bool = False,
+) -> None:
     """删除整棵目录，但**绝不跟随/删除符号链接与 junction**。
 
     v0.9.17：不再调用 ``shutil.rmtree``。Python 3.12 在 Windows 上会把 junction
@@ -279,7 +318,12 @@ def _rmtree(path: Path, is_protected=None) -> None:
     if is_reparse_point(path):
         raise PermissionError(f"拒绝删除符号链接/junction: {path}")
     if is_protected is not None:
-        _guard_path(path, is_protected, TargetAction.DELETE)
+        _guard_path(
+            path,
+            is_protected,
+            TargetAction.DELETE,
+            allow_clear_under_protected=allow_clear_under_protected,
+        )
     try:
         children = list(path.iterdir())
     except OSError:
@@ -293,12 +337,21 @@ def _rmtree(path: Path, is_protected=None) -> None:
         )
     if is_protected is not None:
         for child in children:
-            _guard_path(child, is_protected, TargetAction.DELETE)
+            _guard_path(
+                child,
+                is_protected,
+                TargetAction.DELETE,
+                allow_clear_under_protected=allow_clear_under_protected,
+            )
 
     for child in children:
         try:
             if child.is_dir():
-                _rmtree(child, is_protected)
+                _rmtree(
+                    child,
+                    is_protected,
+                    allow_clear_under_protected=allow_clear_under_protected,
+                )
             else:
                 _unlink_file(child)
         except FileNotFoundError:
@@ -321,6 +374,8 @@ def _delete_path(
     is_protected,          # 安全增强：传入保护检查函数
     shred: bool = False,
     shred_passes: int = 1,
+    *,
+    allow_clear_under_protected: bool = False,
 ) -> CleanMode:
     """删除单个文件或目录，返回**实际执行模式**。
 
@@ -344,8 +399,14 @@ def _delete_path(
         raise PermissionError(f"拒绝删除符号链接/联接（junction）: {path}")
 
     # 重新执行保护检查（防御窗口期内的篡改）
-    # 对于删除子项，一律使用 DELETE 动作（因为 _delete_path 只负责删除自身）
-    _guard_path(real, is_protected, TargetAction.DELETE)
+    # 对于删除子项，一律使用 DELETE 动作（因为 _delete_path 只负责删除自身）。
+    # CLEAR 的子项显式放行 ALLOWED_CLEAR_UNDER_PROTECTED；直接 DELETE 目标不放行。
+    _guard_path(
+        real,
+        is_protected,
+        TargetAction.DELETE,
+        allow_clear_under_protected=allow_clear_under_protected,
+    )
 
     # v0.9.10 安全修复：请求回收站但 send2trash 不可用时**拒绝删除**。
     # 此前该条件写作 `mode is CleanMode.RECYCLE and HAS_SEND2TRASH`，条件不成立时
@@ -369,7 +430,11 @@ def _delete_path(
     if is_dir:
         # v0.9.18：先整树预检，再覆写/删除；避免嵌套 .git 等受保护子树被
         # 普通项目目录“掩护”着一起删掉。
-        _ensure_tree_safe(real, is_protected)
+        _ensure_tree_safe(
+            real,
+            is_protected,
+            allow_clear_under_protected=allow_clear_under_protected,
+        )
         if shred:
             # 先覆写目录内所有文件（递归，显式跳过 junction / 符号链接）
             for child in _iter_files_no_links(real):
@@ -377,7 +442,11 @@ def _delete_path(
                     _shred_file(child, passes=shred_passes)
                 except OSError:
                     continue
-        _rmtree(real, is_protected)
+        _rmtree(
+            real,
+            is_protected,
+            allow_clear_under_protected=allow_clear_under_protected,
+        )
         return CleanMode.PERMANENT
     else:
         if shred:
@@ -466,6 +535,7 @@ def _clear_dir_content(
                 is_protected=is_protected,
                 shred=shred,
                 shred_passes=shred_passes,
+                allow_clear_under_protected=True,
             ) or mode
             if stats is not None:
                 stats[actual_mode.value] = stats.get(actual_mode.value, 0) + child_size
@@ -484,7 +554,7 @@ def _clear_dir_content(
 def _in_use_reason(path: Path) -> str:
     """目标是否被运行中进程占用；是则返回原因描述，否则空串（v0.9.3）。
 
-    依赖 :mod:`pc_cleaner.proc`（零必需依赖，psutil 可选，PowerShell 回退）；
+    依赖 :mod:`pc_cleaner.proc`（psutil 默认依赖，导入失败时 PowerShell 回退）；
     该模块不可用或检测失败时返回空串（不阻断删除，保持原有行为）。
     """
     try:

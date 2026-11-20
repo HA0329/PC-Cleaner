@@ -28,7 +28,7 @@ def test_office_and_adobe_caches_are_default() -> None:
     for key in ("office_caches", "media_caches", "wechat_cache"):
         assert all(not t.get("deep_only") for t in by_key[key]["targets"]), key
     assert sum(1 for s in specs for t in s["targets"] if t.get("deep_only")) == 36
-    assert sum(len(s["targets"]) for s in specs) == 301
+    assert sum(len(s["targets"]) for s in specs) == 300
 
 
 def test_partial_flag_on_cache_categories_only() -> None:

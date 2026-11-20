@@ -1,7 +1,37 @@
 # Changelog
 
-> 本文件维护最近 6 个版本（0.9.13–0.9.18）。更早的 0.2.0–0.9.11 见
+> 本文件维护最近 6 个版本（0.9.14–0.9.19）。更早的 0.2.0–0.9.11 见
 > [docs/changelog-archive.md](docs/changelog-archive.md)。
+
+## 0.9.19 (2026-11)
+
+> 主题：**上一轮审查中仍成立的 P2/P3 收尾**。
+
+### 占用检测与 shred
+
+- `psutil` 改为必需依赖：`skip_if_in_use` 现在默认能读取进程 exe / cmdline /
+  `open_files()`；导入失败仍回退 PowerShell，但不再把“自动跳过”建立在可选依赖上。
+- `--shred` 与回收站模式互斥：默认回收站下不再静默忽略，而是返回
+  `needs_confirmation` 并提示改用 `--permanent`；JSON 路径同样拒绝执行。
+
+### 配置与保护边界
+
+- `save_config` 改为临时文件 + `fsync` + `os.replace` 原子替换，失败抛 `OSError`，
+  不再静默返回“保存成功”；损坏的 `config.json` 会先备份为
+  `config.json.corrupt-*` 再回退默认值。
+- `is_clear_under_protected` 不再死代码：受保护清空白名单（`System32\LogFiles`、
+  `winevt\Logs`）下的 DELETE 目标默认拒绝；只有 CLEAR 的子项显式放行。
+- 校验器拒绝把整个 `%USERPROFILE%` / `~` 作为清理目标，避免自定义规则覆盖
+  文档、桌面和用户注册表配置单元。
+
+### 分类与文档
+
+- `database_compact` 从 `safe` 改为 `moderate`，不再进入 `p` 推荐。
+- `java_rdp_legacy` / `crash_telemetry` 的系统字体缓存、遥测 ServiceStore 移入
+  `system_admin`（需管理员）；规则 34 分类 / 300 目标 / 36 条 deep。
+- CI 最终闸门纳入 `--version` 与 `--validate-rules`；MCP 文档删除“清空回收站”的
+  不实声明。
+- 新增 `tests/test_v0919_audit.py`（11 条）；测试总数 429。
 
 ## 0.9.18 (2026-11)
 

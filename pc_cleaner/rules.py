@@ -620,6 +620,26 @@ USER_DATA_MARKERS: set[str] = {
     "wechat files",
     "downloads",
 }
+
+# v0.9.19：不允许把整个用户目录作为清理目标。
+# 自定义规则里的 ``%USERPROFILE%`` / ``~`` 会展开到文档、桌面、AppData 和
+# NTUSER.DAT 所在目录；即使引擎有注册表配置单元黑名单，也不该让这种“整目录”
+# 规则通过校验。
+_USER_PROFILE_ROOT_PATTERNS = {"%userprofile%", "~", "$home"}
+
+
+def _is_whole_user_profile(raw: str) -> bool:
+    """判断路径是否恰好是整个用户目录（而不是其下的某个缓存目录）。"""
+    value = raw.strip().strip("\\/").lower()
+    if value in _USER_PROFILE_ROOT_PATTERNS:
+        return True
+    try:
+        expanded = _expand_vars_cross_platform(raw)
+        norm = os.path.normcase(os.path.abspath(expanded))
+        home = os.path.normcase(os.path.abspath(os.path.expanduser("~")))
+    except (OSError, ValueError):
+        return False
+    return norm == home
 # 位于这些组件之下的路径视为「应用缓存」而非用户数据（避免误报）
 _APP_DATA_MARKERS = {"appdata", "programdata", "application data"}
 
@@ -1081,6 +1101,12 @@ def validate_rules(
             if not isinstance(t, dict):
                 errors.append(f"{loc} 不是对象")
                 continue
+            for raw in _target_locations(t):
+                if isinstance(raw, str) and _is_whole_user_profile(raw):
+                    errors.append(
+                        f"{loc} 不允许把整个用户目录作为清理目标: {raw}"
+                    )
+                    break
             ttype = t.get("type")
             if ttype not in VALID_TARGET_TYPES:
                 errors.append(f"{loc} 非法 type: {ttype!r}")

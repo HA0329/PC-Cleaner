@@ -547,6 +547,35 @@ def _safe_glob(base: Path, pattern: str, *, recursive: bool = False) -> Iterator
         yield item
 
 
+def _iter_files_no_reparse(base: Path, pattern: str) -> Iterator[Path]:
+    """递归列出普通文件，**显式剪枝符号链接 / junction 目录**。
+
+    v0.9.18：``_scan_broken_shortcuts`` 原来用 ``Path.rglob``；如果开始菜单/
+    桌面里有一个 junction 指向外部磁盘，rglob 会进入链接目标，把外部的
+    ``.lnk`` 也收进来，随后可能被当作死链删除。这里只走真实目录。
+    """
+    stack = [base]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    child = Path(entry.path)
+                    try:
+                        if is_reparse_point(child):
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(child)
+                        elif entry.is_file(follow_symlinks=False) and fnmatch.fnmatch(
+                            child.name.lower(), pattern.lower()
+                        ):
+                            yield child
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+
 def _is_file_safe(p: Path) -> bool:
     """``p.is_file()`` 的容错版本（读不到按"不是文件"处理）。"""
     try:
@@ -1213,7 +1242,12 @@ def _scan_broken_shortcuts(
     for base in bases:
         if not base.exists() or not base.is_dir():
             continue
-        for m in _safe_glob(base, pattern, recursive=recursive):
+        candidates = (
+            _iter_files_no_reparse(base, pattern)
+            if recursive
+            else _safe_glob(base, pattern)
+        )
+        for m in candidates:
             try:
                 if is_reparse_point(m) or not m.is_file():
                     continue

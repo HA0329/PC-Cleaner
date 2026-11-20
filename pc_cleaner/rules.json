@@ -763,7 +763,7 @@
         {
           "type": "clear_dir",
           "path": "%LOCALAPPDATA%/Counter-Strike Global Offensive",
-          "label": "CS:GO 缓存（可能含配置，请确认）",
+          "label": "CS:GO 缓存（可能含配置，请核对）",
           "skip_if_in_use": true
         },
         {
@@ -1146,7 +1146,7 @@
       "label": "下载的安装包/镜像/压缩包",
       "risk": "moderate",
       "all_excluded": true,
-      "note": "Downloads 根目录中的安装包、系统镜像与大型压缩包，按体积与 90/180 天阈值筛选；不随 --all 选中，需用 --clean downloads_installers 单独确认。",
+      "note": "Downloads 根目录中的安装包、系统镜像与大型压缩包，按体积与 90/180 天阈值筛选；不随 --all 选中，需用 --clean downloads_installers 单独选择。",
       "targets": [
         {
           "type": "glob_files",
@@ -1653,7 +1653,7 @@
       "label": "旧版 Windows 残留",
       "risk": "risky",
       "require_admin": true,
-      "note": "Windows.old 是回滚到上一个 Windows 版本的唯一途径，删除不可恢复。建议优先使用「设置 → 系统 → 存储 → 临时文件 → 以前的 Windows 安装」或 cleanmgr 处理；本规则仅在你确认不再需要回滚时使用。",
+      "note": "Windows.old 是回滚到上一个 Windows 版本的唯一途径，删除不可恢复。建议优先使用「设置 → 系统 → 存储 → 临时文件 → 以前的 Windows 安装」或 cleanmgr 处理；本规则仅在你确定不再需要回滚时使用。",
       "targets": [
         {
           "type": "delete_dir",
@@ -2301,7 +2301,7 @@
       "label": "变态级隐蔽缓存(系统账户/下载中断/媒体应用)",
       "risk": "moderate",
       "require_admin": true,
-      "note": "Steam/Epic 中断下载残留、国内主流音视频客户端缓存、CBS/事件日志归档大文件。⚠ 已移除 %WINDIR%/System32/config/systemprofile 下的 SYSTEM 账户缓存（位于受保护路径且需 SYSTEM 权限，请改用系统自带磁盘清理）。请确认无进行中的下载任务后再执行。",
+      "note": "Steam/Epic 中断下载残留、国内主流音视频客户端缓存、CBS/事件日志归档大文件。⚠ 已移除 %WINDIR%/System32/config/systemprofile 下的 SYSTEM 账户缓存（位于受保护路径且需 SYSTEM 权限，请改用系统自带磁盘清理）。请先停止进行中的下载任务后再执行。",
       "targets": [
         {
           "type": "glob_files",

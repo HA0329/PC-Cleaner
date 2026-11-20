@@ -40,7 +40,7 @@ def test_new_coverage_categories_exist() -> None:
 def test_counts_are_in_sync() -> None:
     specs = get_all_category_specs(merge_custom=False, deep=True)
     assert len(specs) == 34
-    assert sum(len(s["targets"]) for s in specs) == 304
+    assert sum(len(s["targets"]) for s in specs) == 301
 
 
 def test_extracted_sibling_helper(tmp_path: Path) -> None:

@@ -185,7 +185,10 @@ def _apply_filters(
             continue
         if exts and t.kind is TargetKind.FILE and t.path.suffix.lower() not in exts:
             continue
-        if cutoff is not None:
+        # v0.9.18：与 CLI 对齐，older_than_days 只作用于文件目标；
+        # 目录目标（CLEAR/DELETE）没有“文件年龄”语义，不能因为目录 mtime
+        # 较新就整目录跳过，否则 MCP 与 CLI 的结果会不一致。
+        if cutoff is not None and t.kind is TargetKind.FILE:
             try:
                 if t.path.stat().st_mtime >= cutoff:
                     continue

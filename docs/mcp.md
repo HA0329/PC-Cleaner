@@ -18,7 +18,7 @@ python -m pc_cleaner --mcp --mcp-allow-delete    # 额外暴露 delete / undo
 | **默认只读** | 未加 `--mcp-allow-delete` 时，`tools/list` 里**没有** `delete` / `undo`，直接调用也会被拒绝 |
 | **两阶段确认** | `preview_delete` 只返回清单 + `confirm_token`（默认 600 秒有效）；执行必须再调 `delete(confirm_token)` |
 | **漂移检测（防 TOCTOU）** | `delete` 会重新扫描并比对清单指纹；目标发生变化 → `status="needs_repreview"`，**不执行** |
-| **危险操作二次授权** | 清单含高风险分类 / 永久删除 / 清空回收站时，`delete` 必须带 `acknowledge_danger=true` |
+| **危险操作二次授权** | 清单含高风险分类 / 永久删除时，`delete` 必须带 `acknowledge_danger=true` |
 | **token 一次性** | 用过即失效；token 绑定清单内容哈希，不能跨清单复用 |
 | **无删除的预览** | `preview_delete` 永远不会调用删除引擎（有单元测试断言） |
 | **留痕可撤销** | v0.9.9：`delete` 写 `history.json` + `audit.log`，删掉的东西可用 `undo` 找回（此前 Agent 删除不留痕，撤销永远落空） |

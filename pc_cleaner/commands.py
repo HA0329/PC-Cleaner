@@ -40,7 +40,7 @@ from .console import (
 from .engine import CleanMode, recycle_available, restore_paths
 from .history import load_history
 from .models import format_size
-from .rules import _builtin_specs, validate_rules
+from .rules import _builtin_specs, get_all_category_specs, validate_rules
 from .scanner import _system_drives, is_admin, recycle_bin_size, scan_all
 from .ui import ScanProgressDisplay, _admin_tag, _echo, _risk_badge, is_elevated
 
@@ -442,7 +442,9 @@ def _cmd_validate_rules(audit_local: bool = False) -> int:
     ``audit_local``（v0.9.8）：额外做本机存活性审计，列出在本机匹配不到任何
     路径的规则（如软件升级后改了目录名），由 ``--audit-rules`` 触发。
     """
-    specs = _builtin_specs(deep=True)
+    # v0.9.18：--validate-rules 必须同时校验 config.json 的 custom_rules，
+     # 否则自定义规则可以“校验 0 错误、运行时静默失效”。
+    specs = get_all_category_specs(merge_custom=True, deep=True)
     errors = validate_rules(specs)
     if errors:
         _echo(red(f"规则校验失败：发现 {len(errors)} 个问题："))

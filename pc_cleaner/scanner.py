@@ -736,28 +736,31 @@ def _scan_clear_dir(
 def _scan_delete_dir(
     spec: dict[str, Any], category_key: str, is_protected, size_memo: dict | None = None
 ) -> list[Target]:
-    base = expand_path(spec["path"])
-    if not base.exists() or not base.is_dir():
-        return []
-    if is_reparse_point(base):
-        logger.warning("跳过符号链接/junction 删除目标（不跟随链接）: %s", base)
-        return []
-    if is_protected(base):
-        return []
-    size, count = _dir_size(base, is_protected, memo=size_memo)
+    """扫描 delete_dir 目标；``path`` 与 ``paths`` 两种写法都支持。"""
     label = spec.get("label", "")
-    return [
-        Target(
-            path=base,
-            kind=TargetKind.DIR,
-            action=TargetAction.DELETE,
-            category=category_key,
-            size=size,
-            file_count=count,
-            label=label,
-            skip_if_in_use=bool(spec.get("skip_if_in_use")),
+    targets: list[Target] = []
+    for base in _candidate_paths(spec):
+        if not base.exists() or not base.is_dir():
+            continue
+        if is_reparse_point(base):
+            logger.warning("跳过符号链接/junction 删除目标（不跟随链接）: %s", base)
+            continue
+        if is_protected(base):
+            continue
+        size, count = _dir_size(base, is_protected, memo=size_memo)
+        targets.append(
+            Target(
+                path=base,
+                kind=TargetKind.DIR,
+                action=TargetAction.DELETE,
+                category=category_key,
+                size=size,
+                file_count=count,
+                label=label,
+                skip_if_in_use=bool(spec.get("skip_if_in_use")),
+            )
         )
-    ]
+    return targets
 
 
 def _scan_glob_dirs(
@@ -1510,6 +1513,7 @@ def scan_all(
     on_progress: ScanProgressCB | None = None,
     workers: int = 0,
     on_category_done: Callable[[CategoryResult], None] | None = None,
+    claim_keys: set[str] | None = None,
 ) -> list[CategoryResult]:
     """扫描所有分类（不含回收站），返回结果列表。
 
@@ -1527,6 +1531,10 @@ def scan_all(
     ``on_category_done``：**每个分类扫完即回调**（v0.9.7 新增），并行模式下也
     按完成顺序实时触发，用于累加"已找到目标/字节数"等实时统计——此前并行
     模式要等全部扫完才一次性回放进度，进度条形同虚设。
+    ``claim_keys``：v0.9.18 新增。只在**这些分类**之间做跨分类去重/父目录归并；
+    未选中的分类即使先扫到同一路径，也不会把目标从选中分类手里“抢走”。
+    为 ``None`` 时保持旧行为，但 ``all_excluded`` 分类默认不参与认领（它们
+    只能被显式 `--clean` 选中，不能吞掉 `downloads` 等普通分类的目标）。
     """
     is_protected = make_protect_check()
     size_memo: dict[str, tuple[int, int]] = {}
@@ -1574,14 +1582,24 @@ def scan_all(
     else:
         ordered = []
         for idx, spec in enumerate(scan_specs, start=1):
-            result = scan_spec(
-                spec, is_protected,
-                scan_depth=scan_depth,
-                on_progress=on_progress,
-                progress_idx=idx,
-                progress_total=total,
-                size_memo=size_memo,
-            )
+            try:
+                result = scan_spec(
+                    spec, is_protected,
+                    scan_depth=scan_depth,
+                    on_progress=on_progress,
+                    progress_idx=idx,
+                    progress_total=total,
+                    size_memo=size_memo,
+                )
+            except Exception as exc:  # noqa: BLE001 单分类失败不影响其它分类
+                logger.exception("分类扫描异常: %s", exc)
+                result = CategoryResult(
+                    key=str(spec.get("key") or "?"),
+                    label=spec.get("label") or category_label(str(spec.get("key") or "?")),
+                    risk=str(spec.get("risk") or "safe"),
+                    note=str(spec.get("note") or ""),
+                    scanned=True,
+                )
             ordered.append(result)
             if on_category_done:
                 try:
@@ -1594,6 +1612,13 @@ def scan_all(
     seen_compact: set[str] = set()
     accepted_dirs: list[Target] = []
     for res in ordered:
+        # 未选中的分类不参与全局认领：否则 downloads_installers 这类
+        # all_excluded 分类会先认领文件，导致单独 `--clean downloads` 时
+        # downloads 一个目标都拿不到。
+        if claim_keys is not None and res.key.lower() not in claim_keys:
+            continue
+        if claim_keys is None and res.all_excluded:
+            continue
         deduped: list[Target] = []
         for t in res.targets:
             key = normalize(t.path)

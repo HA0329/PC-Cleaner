@@ -232,18 +232,54 @@ def _iter_files_no_links(root: Path) -> list[Path]:
     return files
 
 
-def _rmtree(path: Path) -> None:
+def _ensure_tree_safe(root: Path, is_protected) -> None:
+    """在递归删除**任何内容之前**检查整棵树。
+
+    ``_clear_dir_content`` 只检查直接子项；如果缓存目录里有一个普通项目目录，
+    项目目录里再藏着 ``.git`` / 用户数据目录，旧实现会由 ``_rmtree`` 直接删掉
+    整棵子树，绕过受保护检查。这里先完整预检：遇到受保护路径、系统关键文件
+    或任何重解析点就整体拒绝，避免删掉一部分之后才发现禁区、留下半清空目录。
+    """
+    from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
+
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        if is_reparse_point(cur):
+            raise PermissionError(f"目录包含符号链接/junction，拒绝递归删除: {cur}")
+        _guard_path(cur, is_protected, TargetAction.DELETE)
+        try:
+            children = list(cur.iterdir())
+        except OSError:
+            raise
+        for child in children:
+            if is_reparse_point(child):
+                raise PermissionError(f"目录包含符号链接/junction，拒绝递归删除: {child}")
+            _guard_path(child, is_protected, TargetAction.DELETE)
+            try:
+                if child.is_dir():
+                    stack.append(child)
+            except OSError:
+                raise
+
+
+def _rmtree(path: Path, is_protected=None) -> None:
     """删除整棵目录，但**绝不跟随/删除符号链接与 junction**。
 
     v0.9.17：不再调用 ``shutil.rmtree``。Python 3.12 在 Windows 上会把 junction
     当成普通目录递归，目标目录内只要有一个链接，就可能越界删除链接指向的数据；
     这与 SECURITY.md「符号链接 / junction 一律不删、不清空」冲突。这里手工遍历：
     遇到重解析点立即中止当前目录的删除（链接本身及其目标都保留）。
+
+    v0.9.18：每一层都重新做 ``_guard_path`` / 受保护检查，修复“缓存目录里的
+    普通项目目录嵌套 .git 等受保护子树被整体删掉”的问题。
     """
     from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
 
     if is_reparse_point(path):
         raise PermissionError(f"拒绝删除符号链接/junction: {path}")
+    if is_protected is not None:
+        _guard_path(path, is_protected, TargetAction.DELETE)
     try:
         children = list(path.iterdir())
     except OSError:
@@ -255,11 +291,14 @@ def _rmtree(path: Path) -> None:
         raise PermissionError(
             f"目录包含符号链接/junction，拒绝递归删除: {path}"
         )
+    if is_protected is not None:
+        for child in children:
+            _guard_path(child, is_protected, TargetAction.DELETE)
 
     for child in children:
         try:
             if child.is_dir():
-                _rmtree(child)
+                _rmtree(child, is_protected)
             else:
                 _unlink_file(child)
         except FileNotFoundError:
@@ -282,14 +321,15 @@ def _delete_path(
     is_protected,          # 安全增强：传入保护检查函数
     shred: bool = False,
     shred_passes: int = 1,
-) -> None:
-    """删除单个文件或目录。
+) -> CleanMode:
+    """删除单个文件或目录，返回**实际执行模式**。
 
     安全增强：
     - 在操作前重新解析真实路径，并再次调用 _guard_path 做二次检查（TOCTOU）。
     - 所有删除操作基于 real 路径进行。
     - 拒绝删除重解析点（符号链接 / junction）本身：删除链接目标会越界，
       而删除链接自身容易让上层目录结构失效，一律跳过更安全。
+    - v0.9.18：返回实际模式（回收站失败回退到永久删除时不再谎报 recycled）。
     """
     # 重新解析真实路径
     try:
@@ -318,7 +358,7 @@ def _delete_path(
     if mode is CleanMode.RECYCLE:
         try:
             send2trash.send2trash(str(real))
-            return
+            return CleanMode.RECYCLE
         except Exception:
             if not recycle_fallback:
                 raise
@@ -327,6 +367,9 @@ def _delete_path(
 
     # 永久删除
     if is_dir:
+        # v0.9.18：先整树预检，再覆写/删除；避免嵌套 .git 等受保护子树被
+        # 普通项目目录“掩护”着一起删掉。
+        _ensure_tree_safe(real, is_protected)
         if shred:
             # 先覆写目录内所有文件（递归，显式跳过 junction / 符号链接）
             for child in _iter_files_no_links(real):
@@ -334,7 +377,8 @@ def _delete_path(
                     _shred_file(child, passes=shred_passes)
                 except OSError:
                     continue
-        _rmtree(real)
+        _rmtree(real, is_protected)
+        return CleanMode.PERMANENT
     else:
         if shred:
             # 先覆写内容，再删除文件（覆写失败仍尝试删除，避免留下文件）
@@ -345,6 +389,7 @@ def _delete_path(
             os.remove(str(real))
         else:
             os.remove(str(real))
+    return CleanMode.PERMANENT
 
 
 def _clear_dir_content(
@@ -355,8 +400,12 @@ def _clear_dir_content(
     is_protected,
     shred: bool = False,
     shred_passes: int = 1,
+    stats: dict[str, int] | None = None,
 ) -> tuple[int, int]:
     """清空目录内容（保留目录本身），返回 (成功删除的子项数, 失败子项数)。
+
+    ``stats``（v0.9.18）：可选字典，按实际执行模式累计成功删除的字节数
+    （``{"recycle": n, "permanent": n}``），用于回收站回退时如实统计。
 
     逐项容错：单个子项被占用/无权限时计入失败并继续，不中断整个清空。
     重解析点（符号链接 / junction）直接跳过（既不计成功也不计失败），
@@ -408,7 +457,8 @@ def _clear_dir_content(
             continue
         try:
             # 删除子项（无论文件还是目录，均为 DELETE 动作）
-            _delete_path(
+            child_size = _path_size_now(child)
+            actual_mode = _delete_path(
                 child,
                 mode,
                 is_dir=child_is_dir,
@@ -416,7 +466,9 @@ def _clear_dir_content(
                 is_protected=is_protected,
                 shred=shred,
                 shred_passes=shred_passes,
-            )
+            ) or mode
+            if stats is not None:
+                stats[actual_mode.value] = stats.get(actual_mode.value, 0) + child_size
             deleted += 1
             on_progress(child)
         except (PermissionError, OSError):
@@ -558,7 +610,7 @@ def delete_targets(
                     audit(t.path, 0, "vanished", 0)
                     on_progress(i, total, f"[跳过] {t.path}（目标已不存在，无需清理）")
                     continue
-                _delete_path(
+                actual_mode = _delete_path(
                     t.path,
                     mode,
                     is_dir=False,
@@ -567,16 +619,27 @@ def delete_targets(
                     shred=shred,
                     shred_passes=shred_passes,
                 )
-                if recycle_mode:
+                if actual_mode is CleanMode.RECYCLE:
                     recycled += before
-                    audit(t.path, before, mode.value, 0)
+                    audit(t.path, before, actual_mode.value, 0)
                 else:
                     freed_here = max(before - _path_size_now(t.path), 0)
                     freed += freed_here
-                    audit(t.path, before, mode.value, freed_here)
+                    audit(t.path, before, actual_mode.value, freed_here)
             elif t.action is TargetAction.CLEAR:
                 # 清空目录内容（保留目录本身）
+                # v0.9.18：先确认目标还在；扫描后消失的目标不能算 deleted。
+                try:
+                    exists_before = t.path.exists()
+                except OSError:
+                    exists_before = False
+                if not exists_before:
+                    vanished += 1
+                    audit(t.path, 0, "vanished", 0)
+                    on_progress(i, total, f"[跳过] {t.path}（目标已不存在，无需清理）")
+                    continue
                 before = _dir_size_now(t.path)
+                clear_stats: dict[str, int] = {}
                 _cleared, clear_failed = _clear_dir_content(
                     t.path,
                     mode,
@@ -585,15 +648,36 @@ def delete_targets(
                     is_protected=is_protected,
                     shred=shred,
                     shred_passes=shred_passes,
+                    stats=clear_stats,
                 )
                 after = _dir_size_now(t.path)
-                freed_here = max(before - after, 0)
-                if recycle_mode:
-                    recycled += freed_here
-                    audit(t.path, t.size, mode.value, 0)
+                recycled_here = clear_stats.get("recycle", 0)
+                freed_here = clear_stats.get("permanent", 0)
+                if not clear_stats:
+                    freed_here = max(before - after, 0)
+                if _cleared == 0 and clear_failed == 0:
+                    # 目录还在但没有任何子项被处理：空目录 / 竞态 / 全部是链接。
+                    # 不能计为“删除成功”，否则自动化会误以为清理生效。
+                    try:
+                        still_there = t.path.exists()
+                    except OSError:
+                        still_there = False
+                    if not still_there:
+                        vanished += 1
+                        audit(t.path, 0, "vanished", 0)
+                        on_progress(i, total, f"[跳过] {t.path}（目标已不存在，无需清理）")
+                    else:
+                        skipped += 1
+                        on_progress(i, total, f"[跳过] {t.path}（没有可清理的子项）")
+                    continue
+                recycled += recycled_here
+                freed += freed_here
+                if recycled_here and not freed_here:
+                    audit(t.path, recycled_here, CleanMode.RECYCLE.value, 0)
+                elif freed_here:
+                    audit(t.path, freed_here, CleanMode.PERMANENT.value, freed_here)
                 else:
-                    freed += freed_here
-                    audit(t.path, t.size, mode.value, freed_here)
+                    audit(t.path, 0, mode.value, 0)
                 if clear_failed and freed_here == 0:
                     # 一个都没删掉：计入失败/占用，避免"假装成功"
                     if in_use_reason:
@@ -610,7 +694,7 @@ def delete_targets(
                     skipped += 1
             else:  # DELETE directory
                 before = _dir_size_now(t.path)
-                _delete_path(
+                actual_mode = _delete_path(
                     t.path,
                     mode,
                     is_dir=True,
@@ -619,13 +703,13 @@ def delete_targets(
                     shred=shred,
                     shred_passes=shred_passes,
                 )
-                if recycle_mode:
+                if actual_mode is CleanMode.RECYCLE:
                     recycled += before
-                    audit(t.path, before, mode.value, 0)
+                    audit(t.path, before, actual_mode.value, 0)
                 else:
                     freed_here = max(before - _dir_size_now(t.path), 0)
                     freed += freed_here
-                    audit(t.path, before, mode.value, freed_here)
+                    audit(t.path, before, actual_mode.value, freed_here)
             deleted += 1
             on_progress(i, total, t.describe())
         except FileNotFoundError:

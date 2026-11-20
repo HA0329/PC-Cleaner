@@ -1,7 +1,43 @@
 # Changelog
 
-> 本文件维护最近 6 个版本（0.9.12–0.9.17）。更早的 0.2.0–0.9.11 见
+> 本文件维护最近 6 个版本（0.9.13–0.9.18）。更早的 0.2.0–0.9.11 见
 > [docs/changelog-archive.md](docs/changelog-archive.md)。
+
+## 0.9.18 (2026-11)
+
+> 主题：**上一版审查遗留的 P0/P1 与统计真实性**。
+
+### 删除安全
+
+- `_rmtree` / `_delete_path` 在递归删除前对整棵树做预检：每一层都执行
+  `_guard_path` 与 `is_protected`，缓存目录中嵌套的 `.git`、微信数据目录等
+  受保护子树不再被普通项目目录“掩护”着整体删除。
+- 直接拒绝包含重解析点的目录树；预检在删除任何文件之前完成，避免半清空。
+
+### 分类边界
+
+- `system_logs` 从 `safe` 改为 `moderate` + `require_admin`：未提权时不扫描、
+  不进入 `p` 推荐；移除 `%WINDIR%/security/logs`、事件日志归档
+  `winevt/Logs/Archive-*.evtx`、`ProgramData/.../SystemData` 三个高风险目标。
+- 规则总数从 304 变为 301，深度规则从 38 变为 36。
+
+### 选择与统计
+
+- `scan_all` 新增 `claim_keys`：先确定选中分类再跨分类去重；未选中分类
+  （尤其 `downloads_installers` 等 `all_excluded`）不再抢走 `downloads` 的目标。
+- `delete_dir` 支持 `paths` 多候选写法，扫描器与校验器一致。
+- `_delete_path` 返回实际执行模式：回收站失败回退永久删除时计入 `freed`，
+  审计记 `permanent`，不再虚报 `recycled`。
+- CLEAR 目标在删除前消失时计入 `vanished`；空目录/无子项可清时不再算 `deleted`。
+
+### 其他
+
+- `--validate-rules` 改为校验内置 + `custom_rules`；`paths` 必须是合法字符串列表。
+- MCP `older_than_days` 只作用于文件目标，与 CLI 一致。
+- 危险操作 `--yes` 的二次确认要求完整输入 `yes`。
+- 系统关键文件名单加入用户注册表配置单元 `NTUSER.DAT` / `UsrClass.dat`。
+- 串行扫描同样捕获单分类异常，不再让一个分类拖垮整次扫描。
+- 新增 `tests/test_v0918_audit.py`（8 条）；测试总数 418。
 
 ## 0.9.17 (2026-11)
 

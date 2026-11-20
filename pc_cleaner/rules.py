@@ -43,6 +43,9 @@ SYSTEM_CRITICAL_FILES = {
     "$mft",            # 主文件表（NTFS）
     "$bitmap",         # 位图文件（NTFS）
     "$logfile",        # 日志文件（NTFS）
+    # v0.9.18：用户注册表配置单元，删除后用户配置/登录状态会损坏。
+    "ntuser.dat",
+    "usrclass.dat",
 }
 
 # ===========================================================================
@@ -1090,10 +1093,18 @@ def validate_rules(
             # v0.9.8：clear_dir/delete_dir 支持 `paths`（多候选路径），
             # glob_dirs 支持 `bases`（多候选基目录），用于兼容同一软件的不同
             # 版本目录布局。二者与原有单数写法等价，至少给出其一即可。
-            if ttype in ("clear_dir", "delete_dir") and not (
-                t.get("path") or t.get("paths")
-            ):
-                errors.append(f"{loc} 缺少 path（或 paths）")
+            if ttype in ("clear_dir", "delete_dir"):
+                path = t.get("path")
+                paths = t.get("paths")
+                if not (path or paths):
+                    errors.append(f"{loc} 缺少 path（或 paths）")
+                if paths is not None:
+                    if not isinstance(paths, (list, tuple)):
+                        errors.append(f"{loc} paths 必须是路径列表")
+                    elif not paths or not all(
+                        isinstance(p, str) and p.strip() for p in paths
+                    ):
+                        errors.append(f"{loc} paths 必须是非空字符串列表")
             # v0.9.9：broken_shortcuts 的根目录可以是 base 或 bases
             if ttype == "broken_shortcuts" and not (t.get("base") or t.get("bases")):
                 errors.append(f"{loc} 缺少 base（或 bases）")

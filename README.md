@@ -1,8 +1,8 @@
 # 🧹 PC Junk Cleaner
 
 > **Windows-only** 的个人电脑安全垃圾清理工具：先扫描、再确认，默认进回收站，可撤销。
-> 当前版本 **0.9.17**（版本记录见 [CHANGELOG.md](CHANGELOG.md)）；内置 **34 个分类、304 条内置规则**
-> （34 分类 304 目标），其中 38 条深度规则。
+> 当前版本 **0.9.18**（版本记录见 [CHANGELOG.md](CHANGELOG.md)）；内置 **34 个分类、301 条内置规则**
+> （34 分类 301 目标），其中 36 条深度规则。
 
 ```powershell
 python -m pc_cleaner --list      # 只扫描，不删任何东西
@@ -70,7 +70,7 @@ python -m pc_cleaner --clean system_temp  # 清理指定分类（先预览再确
 | `downloads` | 🔴 | Downloads 中 100MB+ 且 180 天未修改的大/旧文件（默认隐藏） |
 | `system_admin` | 🟡 | Windows 更新缓存、Prefetch、SystemTemp、chkdsk 残留等（需管理员） |
 | `system_wer` | 🟡 | ProgramData WER 归档/队列/Temp（需管理员） |
-| `system_logs` | 🟢 | DISM/CBS/waasmedic 日志、`System32\LogFiles`、事件日志归档、传递优化缓存 |
+| `system_logs` | 🟡 | DISM/CBS/waasmedic 日志、`System32\LogFiles`、传递优化缓存（需管理员） |
 | `windows_old` | 🔴 | `C:\Windows.old`（默认隐藏，需管理员） |
 | `dev_purge` | 🔴 | 散落 node_modules / dist / build / target / .next（默认隐藏） |
 | `browser_privacy` | 🔴 | Cookie 与浏览历史（默认隐藏，会退出登录） |
@@ -200,7 +200,7 @@ python -m pc_cleaner --mcp --mcp-allow-delete    # 额外暴露 delete/undo
 ```
 pc_cleaner/   # cli、menu、scanner、engine、rules、lnk、registry、health、mcp、history...
 docs/         # json-contract.md、mcp.md、changelog-archive.md
-tests/                     # 410 个单元测试
+tests/                     # 418 个单元测试
 ```
 
 ---
@@ -211,7 +211,7 @@ tests/                     # 410 个单元测试
 pip install -e ".[dev]"
 python -m ruff check pc_cleaner tests   # 未使用导入 / 导入顺序 / 常见 bug
 python -m mypy                         # win32 平台，含未注解函数
-pytest        # 410 passed（须在项目根目录运行，见上方提示）
+pytest        # 418 passed（须在项目根目录运行，见上方提示）
 ```
 
 CI 在 Windows × Python 3.12 上运行 pytest、`ruff`、`mypy`、规则校验和 JSON 健康检查。

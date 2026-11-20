@@ -426,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
             on_progress=progress if show_progress else None,
             workers=workers,
             on_category_done=progress.category_done if show_progress else None,
+            claim_keys=_claim_keys_for_selection(args, specs, excluded, show_risky),
         )
     except KeyboardInterrupt:
         progress.finish([])
@@ -647,6 +648,31 @@ def _json_target_preview(
     ]
 
 
+def _claim_keys_for_selection(
+    args,
+    specs: list[dict[str, Any]],
+    excluded: set[str],
+    show_risky: bool,
+) -> set[str] | None:
+    """v0.9.18：在扫描前算出“用户实际选中”的分类，交给 scan_all 做认领去重。
+
+    此前 scan_all 先对所有分类做全局去重，再按 --clean/--all 过滤；结果是
+    downloads_installers（all_excluded）先认领文件，单独 --clean downloads
+    时下载分类一个目标都拿不到。现在选中集合先确定，未选分类不参与认领。
+    """
+    if args.all:
+        return {
+            str(s.get("key", "")).lower()
+            for s in specs
+            if (show_risky or str(s.get("risk") or "safe") != "risky")
+            and not bool(s.get("all_excluded"))
+            and str(s.get("key", "")).lower() not in excluded
+        }
+    if args.clean is not None:
+        return {k.lower() for k in _parse_keys(args.clean) if k.lower() not in excluded}
+    return None
+
+
 def _json_stdout_mode(
     args,
     specs: list[dict[str, Any]],
@@ -674,7 +700,12 @@ def _json_stdout_mode(
     # 合法 JSON 对象（status="interrupted" / 退出码 130），而不是把 Python
     # 堆栈打到 stderr、让调用方拿到半个信封。
     try:
-        results = scan_all(specs, scan_depth=scan_depth, workers=workers)
+        results = scan_all(
+            specs,
+            scan_depth=scan_depth,
+            workers=workers,
+            claim_keys=_claim_keys_for_selection(args, specs, excluded, show_risky),
+        )
     except KeyboardInterrupt:
         interrupted = envelope("interrupted", EXIT_INTERRUPTED)
         interrupted["categories"] = []

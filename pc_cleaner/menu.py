@@ -967,7 +967,9 @@ def _run_clean_flow(
             _echo(red("⚠️  警告：当前操作包含不可恢复的删除！"))
             if reasons:
                 _echo(red("    " + "；".join(reasons)))
-            if not prompt_yes_no("  确认要继续吗？(输入 yes 继续)", default=False):
+            if not prompt_yes_no(
+                "  确认要继续吗？(输入 yes 继续)", default=False, require_typed=True
+            ):
                 return {"cancelled": True}
 
     # 执行删除

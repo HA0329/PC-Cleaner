@@ -411,21 +411,22 @@ def test_dry_run_reports_no_deletion(probe: dict[str, CliResult]) -> None:
 # 5. --health --json
 # ---------------------------------------------------------------------------
 def test_health_items_count_is_sixteen(probe: dict[str, CliResult]) -> None:
-    """``health.items`` 必须是 16 项，或在**慢项超预算**时退化为 15 项。
+    """``health.items`` 必须是 16 项，或在**慢项超预算**时退化为 12~15 项。
 
     v0.9.10 修正：``collect()`` 有明确的超时预算（``SLOW_BUDGET_SECONDS = 11``）——
-    慢项累计超过预算时，剩余慢项会被**合并成一条 ``slow_skipped``**（这是设计，
-    用于保证体检在慢机器上也能快速返回）。原断言硬要求恰好 16 项，于是在
-    公共 CI runner（负载抖动大）上会间歇性失败：实测 windows/3.13 只拿到 14 项。
-    现在按契约判定：要么 16 项齐全，要么出现且仅出现一条 ``slow_skipped``。
+    11 个快项 + 5 个慢项共 16 项；慢项累计超过预算时，剩余慢项会被**合并成一条
+    ``slow_skipped``**（这是设计，用于保证体检在慢机器上也能快速返回）。如果预算
+    在第一个慢项前就耗尽，5 个慢项会全部被这一条替代，因此 12 项也是合法降级；
+    如果预算在中间耗尽，则是 13~15 项。原断言只接受 15/16，会在公共 CI runner
+    负载抖动时误报。现在按契约判定：16 项齐全，或出现且仅出现一条 ``slow_skipped``。
     """
     health = _payload(probe["health"])["health"]
     assert isinstance(health, dict)
     keys = [i.get("key") for i in health["items"]]
-    assert len(keys) in (15, 16), keys
-    if len(keys) == 15:
+    assert 12 <= len(keys) <= 16, keys
+    if len(keys) < 16:
         assert keys.count("slow_skipped") == 1, (
-            f"只有 15 项时必须恰好有一条 slow_skipped（慢项超预算），实际: {keys}"
+            f"少于 16 项时必须恰好有一条 slow_skipped（慢项超预算），实际: {keys}"
         )
     else:
         assert "slow_skipped" not in keys, f"16 项齐全时不应出现 slow_skipped: {keys}"

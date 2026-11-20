@@ -7,7 +7,7 @@ import sys
 import time
 
 import pytest
-
+from pc_cleaner.cli import _parse_selection
 from pc_cleaner.config import DEFAULTS, load_config
 from pc_cleaner.console import display_width, pad_cjk
 from pc_cleaner.engine import CleanMode, delete_targets
@@ -17,8 +17,6 @@ from pc_cleaner.scanner import (
     scan_all,
     scan_spec,
 )
-
-from pc_cleaner.cli import _parse_selection
 
 # ---------------------------------------------------------------------------
 # models / console

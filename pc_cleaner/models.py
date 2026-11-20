@@ -56,6 +56,9 @@ class Target:
     #: 典型场景：npm ``_npx`` 目录里可能正跑着 npx 安装的 CLI / AI 工具，
     #: 清掉会让它们"当场不报错、下次启动才崩"。
     skip_if_in_use: bool = False
+    #: v0.9.13：CLEAR 目标被占用时是否只清理未锁定子项（而不是整目标跳过）。
+    #: 仅对"缓存/临时目录"开启；npm ``_npx``、系统更新缓存等仍需整目标跳过。
+    partial_if_in_use: bool = False
 
     @property
     def display_size(self) -> str:
@@ -133,6 +136,10 @@ class CategoryResult:
     requires_admin: bool = False
     #: 因缺少管理员权限而未扫描(True 时 targets 为空)
     admin_blocked: bool = False
+    #: 是否从 `--all` / 菜单 `all` 中排除（仍可用 `--clean <key>` 单独选择）
+    all_excluded: bool = False
+    #: 面向用户的分类说明（来自 rules.json 的 note，v0.9.14 进入 UI）
+    note: str = ""
     #: 扫描耗时（秒）
     scan_duration: float = 0.0
 

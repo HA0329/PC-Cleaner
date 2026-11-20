@@ -49,7 +49,7 @@ from typing import Any
 try:  # 包内导入（python -m pc_cleaner.health / import pc_cleaner.health）
     from .i18n import t
 except ImportError:  # 兜底：直接执行本文件时（python pc_cleaner/health.py）
-    from pc_cleaner.i18n import t  # type: ignore[no-redef]
+    from pc_cleaner.i18n import t
 
 LOGGER = logging.getLogger("pc_cleaner.health")
 
@@ -310,7 +310,7 @@ def _fixed_drive_roots() -> list[str]:
     """
     roots: list[str] = []
     try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     except (OSError, AttributeError) as exc:
         LOGGER.debug("加载 kernel32 失败：%s", exc)
         return roots

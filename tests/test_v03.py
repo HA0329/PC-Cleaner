@@ -9,8 +9,8 @@ from __future__ import annotations
 import os
 import sys
 
-import pytest
-
+import pc_cleaner.rules as rules_mod
+import pc_cleaner.scanner as scanner_mod
 from pc_cleaner.config import config_dir, load_config
 from pc_cleaner.engine import (
     CleanMode,
@@ -22,18 +22,13 @@ from pc_cleaner.engine import (
 from pc_cleaner.history import append_session, last_session, load_history
 from pc_cleaner.models import Target, TargetAction, TargetKind
 from pc_cleaner.rules import (
-    ALLOWED_CLEAR_ROOTS,
     get_all_category_specs,
     is_risky_spec,
-    is_within_clear_root,
 )
 from pc_cleaner.scanner import (
     make_protect_check,
     scan_spec,
 )
-
-import pc_cleaner.rules as rules_mod
-import pc_cleaner.scanner as scanner_mod
 
 
 # ---------------------------------------------------------------------------
@@ -314,15 +309,15 @@ def test_builtin_new_targets_present():
     assert "Windows 更新缓存" in labels
     # v0.9.5：规则标签加了「清理后首次启动/常用程序可能变慢」的提示后缀，
     # 断言改为前缀匹配
-    assert any(str(l).startswith("预读取(Prefetch)") for l in labels)
+    assert any(str(label).startswith("预读取(Prefetch)") for label in labels)
     # 浏览器新增 Brave / Vivaldi
     web_labels = [t.get("label") for t in specs["web_cache"]["targets"]]
-    assert any("Brave" in l for l in web_labels)
-    assert any("Vivaldi" in l for l in web_labels)
+    assert any("Brave" in label for label in web_labels)
+    assert any("Vivaldi" in label for label in web_labels)
     # 开发缓存新增 NuGet / Gradle
     dev_labels = [t.get("label") for t in specs["dev_caches"]["targets"]]
-    assert any("NuGet" in l for l in dev_labels)
-    assert any("Gradle" in l for l in dev_labels)
+    assert any("NuGet" in label for label in dev_labels)
+    assert any("Gradle" in label for label in dev_labels)
     # 图标缓存
     sys_labels = [t.get("label") for t in specs["system_temp"]["targets"]]
     assert "图标缓存" in sys_labels

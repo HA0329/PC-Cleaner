@@ -15,17 +15,26 @@
 
 from __future__ import annotations
 
+import re  # 安全增强：扩展名校验
 import shutil
 import sys
+import textwrap
 import time
-import re  # 安全增强：扩展名校验
 from typing import Any
 
 from . import __version__
 from .config import load_config
 from .console import (
-    bold, cyan, dim, green, red, yellow,
-    pad_cjk, display_width, truncate_path, get_terminal_width,
+    bold,
+    cyan,
+    dim,
+    display_width,
+    get_terminal_width,
+    green,
+    pad_cjk,
+    red,
+    truncate_path,
+    yellow,
 )
 from .engine import (
     CleanMode,
@@ -48,6 +57,57 @@ from .ui import (
 )
 
 # 注意：不再从 .cli 导入任何内容，避免循环依赖
+
+# ===========================================================================
+# 一键推荐（v0.9.14）
+# ===========================================================================
+#: 推荐清理额外纳入的 moderate 分类。刻意只包含“可重建的应用缓存”，
+#: 不把下载目录、开发缓存、使用痕迹、系统升级残留等交给一键流程：
+#: 这些内容要么属于用户数据，要么清理代价不明显，应由用户显式选择。
+_RECOMMENDED_MODERATE = frozenset({
+    "game_caches",
+    "game_runtime_cache",
+    "live_stream_cache",
+    "webview2_caches",
+})
+
+
+def recommended_categories(results: list[CategoryResult]) -> list[CategoryResult]:
+    """返回“一键推荐”应选中的分类。
+
+    规则：
+    - safe 分类全部纳入（都是可重建缓存/临时文件）；
+    - 仅额外纳入 :data:`_RECOMMENDED_MODERATE` 中的 moderate 分类；
+    - 跳过 risky、需管理员、``all_excluded``、没有目标或未扫描的分类。
+
+    推荐列表不包含回收站、Downloads 个人文件、开发缓存、使用痕迹和系统大件。
+    """
+    out: list[CategoryResult] = []
+    for res in results:
+        if not res.targets or res.admin_blocked or res.all_excluded:
+            continue
+        if res.risk == "safe":
+            out.append(res)
+        elif res.risk == "moderate" and res.key in _RECOMMENDED_MODERATE:
+            out.append(res)
+    return out
+
+
+def _menu_relaunch_argv(raw_argv: list[str] | None, *, deep: bool) -> list[str]:
+    """构造菜单内按 ``e`` 提权时传给新进程的参数。
+
+    去掉旧的 ``--admin`` / ``--deep`` / ``-D``，再按当前菜单状态补回，
+    避免“菜单里关了深度，提权后却又变回深度模式”的错位。
+    """
+    cleaned: list[str] = []
+    for item in list(raw_argv or []):
+        if item in ("--deep", "-D", "--admin"):
+            continue
+        cleaned.append(item)
+    if deep:
+        cleaned.append("--deep")
+    cleaned.append("--admin")
+    return cleaned
 
 
 # ===========================================================================
@@ -124,6 +184,118 @@ def _apply_target_filters(
                 continue
         out.append(t)
     return out
+
+
+# ===========================================================================
+# 推荐清理 / 结果文案（v0.9.14）
+# ===========================================================================
+def _print_category_note(note: str, indent: str = "    ") -> None:
+    """按终端宽度折行展示分类说明，避免 note 只存在于 rules.json。"""
+    note = " ".join(str(note or "").split())
+    if not note:
+        return
+    # 中文按 2 个显示列估算；至少给 20 个字符，防止窄终端里每行只放两三个字。
+    width = max(20, (get_terminal_width() - display_width(indent) - 4) // 2)
+    _echo(dim(indent + "说明:"))
+    for line in textwrap.wrap(
+        note, width=width, break_long_words=False, break_on_hyphens=False
+    ):
+        _echo(dim(indent + "  " + line))
+
+
+def _format_clean_result_summary(result: dict[str, Any], mode: CleanMode) -> str:
+    """把引擎计数翻译成用户能看懂的一句话。
+
+    回收站模式先说“已移入回收站”而不是“释放”，因为进回收站并不会立即腾出
+    磁盘空间；永久模式才说“已释放”。失败、部分完成、占用跳过分开报。
+    """
+    recycled = int(result.get("recycled", 0) or 0)
+    freed = int(result.get("freed", 0) or 0)
+    deleted = int(result.get("deleted", 0) or 0)
+    failed = int(result.get("failed", 0) or 0)
+    skipped = int(result.get("skipped", 0) or 0)
+    skipped_in_use = int(result.get("skipped_in_use", 0) or 0)
+    vanished = int(result.get("vanished", 0) or 0)
+
+    if mode is CleanMode.RECYCLE and recycled:
+        headline = (
+            f"已移入回收站 {green(format_size(recycled))}"
+            f"（可恢复；清空回收站后才会释放）"
+        )
+        if freed:
+            headline += f"，另实际释放 {green(format_size(freed))}"
+    elif freed:
+        headline = f"已释放 {green(format_size(freed))}"
+    elif deleted:
+        headline = "已处理目标，但本次没有可统计的释放量"
+    else:
+        headline = "本次没有实际清理内容"
+
+    details: list[str] = []
+    if deleted:
+        details.append(f"处理 {deleted} 项目标")
+    if failed:
+        details.append(yellow(f"失败 {failed} 项"))
+    if skipped:
+        details.append(yellow(f"部分完成 {skipped} 项"))
+    if skipped_in_use:
+        details.append(yellow(f"占用跳过 {skipped_in_use} 项"))
+    if vanished:
+        details.append(f"{vanished} 项在扫描后已不存在")
+
+    if details:
+        return headline + "；" + "，".join(details) + "。"
+    return headline + "。"
+
+
+def _print_clean_next_steps(result: dict[str, Any], mode: CleanMode) -> None:
+    """清理完成后给 0-3 条真正可执行的下一步，不堆无关建议。"""
+    hints: list[str] = []
+    if result.get("skipped_in_use") or result.get("skipped"):
+        hints.append(
+            "关闭正在使用这些缓存的程序（浏览器/微信/Office），再按 f 重扫。"
+        )
+    if result.get("failed"):
+        hints.append("失败项可能被占用或权限不足；--history 可查看记录。")
+    if mode is CleanMode.RECYCLE and result.get("recycled"):
+        hints.append("需要立即释放空间：按 r 清空回收站（不可恢复）。")
+    for hint in hints:
+        _echo(dim("  下一步: " + hint))
+
+
+def _print_recommended_overview(
+    selected: list[CategoryResult], all_results: list[CategoryResult]
+) -> None:
+    """一键推荐执行前的分类级预览（不展开每个路径）。"""
+    total_targets = sum(len(r.targets) for r in selected)
+    total_bytes = sum(r.liberatable for r in selected)
+    _echo("")
+    _echo(bold("★ 推荐清理（安全项 + 常用应用缓存）"))
+    _echo(dim("  只清可重建的缓存/临时文件，不碰个人文件、聊天记录和登录数据。"))
+    for res in sorted(selected, key=lambda r: r.liberatable, reverse=True):
+        badge = _risk_badge(res.risk)
+        _echo(
+            f"  {badge} {res.label}  "
+            f"{green(format_size(res.liberatable))}  "
+            f"{dim(f'{res.total_count} 文件')}"
+        )
+    _echo(dim("  " + "─" * min(max(get_terminal_width() - 4, 30), 72)))
+    _echo(
+        f"  合计: {len(selected)} 个分类 / {total_targets} 个目标 / "
+        f"{green(format_size(total_bytes))}"
+    )
+    blocked = [r for r in all_results if r.admin_blocked]
+    if blocked:
+        _echo(
+            dim(
+                f"  另有 {len(blocked)} 个分类需管理员权限，"
+                f"按 e 提权重启后可在分类里单独选择。"
+            )
+        )
+    _echo(dim("  不含: 高风险分类、下载目录、开发缓存、使用痕迹、需管理员分类。"))
+    if sys.platform == "win32" and any(r.key == "wechat_cache" for r in selected):
+        _echo(dim("  提示: 微信正在运行时，微信缓存会整类跳过；清理前先退出微信。"))
+    _echo(dim("  想逐条核对路径：取消后按编号选择分类，确认前会显示具体路径。"))
 
 
 # ===========================================================================
@@ -389,6 +561,18 @@ def _print_menu_footer(
         _echo(f"  {red('r')}. 回收站 (清空, 占用 {yellow(format_size(bin_size))})")
     else:
         _echo(f"  {dim('r')}. 回收站 (清空)")
+
+    # v0.9.14：把“推荐清理”放到第一屏最显眼的位置。普通用户不需要理解
+    # 30 个分类的编号，只要知道按 p 能清多少、清的是什么。
+    rec = recommended_categories(results)
+    if rec:
+        rec_bytes = sum(r.liberatable for r in rec)
+        _echo(
+            f"  {bold('★ p 推荐清理')}: {len(rec)} 个分类，约 "
+            f"{green(format_size(rec_bytes))}"
+        )
+        _echo(dim("      仅安全项 + 游戏/直播/WebView2 缓存"))
+        _echo(dim("      不含高风险、下载、开发缓存、使用痕迹"))
     _echo("")
 
     # 空分类 / 未编号小结
@@ -405,6 +589,9 @@ def _print_menu_footer(
             notes.append(dim(f"{res.label}(空)"))
     if notes:
         _echo(dim("  其余分类(未编号, 当前无可清理): " + " · ".join(notes)))
+    all_skipped = [r.label for r in results if r.all_excluded and r.targets]
+    if all_skipped:
+        _echo(dim("  （all 不含: " + " · ".join(all_skipped) + "，请用编号单独选择）"))
     if not show_risky:
         risky_hidden = [r.label for r in results if r.risk == "risky"]
         if risky_hidden:
@@ -420,10 +607,9 @@ def _print_menu_footer(
 
     _echo("")
     _echo(dim("  操作: "))
-    _echo(dim("    编号 如 1,3-5   选择分类（逗号/区间分隔，可多选）"))
-    _echo(dim("    all / a         全选 · r 回收站 · 0 清空选择"))
-    _echo(dim("    d <编号> 详情    t <编号> 树形 · s <排序> 切换"))
-    _echo(dim("    x 高风险显示     f 重新扫描 · h 帮助 · q 退出"))
+    _echo(dim("    编号 1,3-5 选择 · p 推荐一键清理 · all 全选 · r 回收站"))
+    _echo(dim("    0 清空选择 · d 详情 · t 树形 · s 排序 · x 高风险"))
+    _echo(dim("    D(大写) 深度切换 · e 管理员 · f 重扫 · u 撤销 · h 帮助 · q 退出"))
     _echo("")
 
 
@@ -517,10 +703,12 @@ def _print_detail_for_category(res: CategoryResult, sort_by: str = "size_desc") 
         return
 
     if not res.targets:
-        _echo(f"    （无目标）")
+        _echo("    （无目标）")
         return
 
     _echo(dim(f"    共 {len(res.targets)} 个目标, {res.total_count} 个文件, 可释放 {green(format_size(res.liberatable))}"))
+    if res.note:
+        _print_category_note(res.note)
     _echo(dim(f"    {'─' * 70}"))
 
     _preview_targets(res.targets, max_lines=0, sort_by=sort_by, compact=False)
@@ -658,6 +846,7 @@ def _run_clean_flow(
     min_size_bytes: int | None = None,
     older_than_secs: int | None = None,
     allow_dangerous: bool = False,
+    show_preview: bool = True,
 ) -> dict[str, Any]:
     """对选中的分类执行：预览 -> 确认 -> 删除。
 
@@ -685,7 +874,7 @@ def _run_clean_flow(
     sort_by = cfg.get("default_sort", "size_desc")
 
     _echo("")
-    if targets:
+    if targets and show_preview:
         _echo(bold("将删除以下内容（预览）："))
         for res, fl in per_category:
             _echo(f"  【{res.label}】")
@@ -732,7 +921,7 @@ def _run_clean_flow(
             total_bytes = sum(t.size for _, fl in per_category for t in fl)
             risky_labels = sorted({r.label for r in selected if r.risk == "risky"})
             prompt = (
-                f"确认{_mode_label_plain(mode)}以上 {total_targets} 个目标"
+                f"确认将以上 {total_targets} 个目标{_mode_label_plain(mode)}"
                 f"（约 {format_size(total_bytes)}）？"
             )
             if dangerous:
@@ -807,7 +996,7 @@ def _run_clean_flow(
     # 也要把"已处理的目标"落盘，否则已进回收站的文件无法用 --undo-last 找回。
     try:
         if targets:
-            res = delete_targets(
+            delete_result = delete_targets(
                 targets,
                 mode,
                 on_progress=cleaner,
@@ -816,13 +1005,13 @@ def _run_clean_flow(
                 shred_passes=shred_passes,
                 audit=audit_log,
             )
-            result["deleted"] += res["deleted"]
-            result["failed"] += res["failed"]
-            result["skipped"] += res.get("skipped", 0)
-            result["skipped_in_use"] += res.get("skipped_in_use", 0)
-            result["vanished"] += res.get("vanished", 0)
-            result["freed"] += res["freed"]
-            result["recycled"] += res.get("recycled", 0)
+            result["deleted"] += delete_result["deleted"]
+            result["failed"] += delete_result["failed"]
+            result["skipped"] += delete_result.get("skipped", 0)
+            result["skipped_in_use"] += delete_result.get("skipped_in_use", 0)
+            result["vanished"] += delete_result.get("vanished", 0)
+            result["freed"] += delete_result["freed"]
+            result["recycled"] += delete_result.get("recycled", 0)
         # 清掉实时状态行（汇总由下面的"完成：…"统一输出）
         cleaner.finish(None)
 
@@ -866,28 +1055,8 @@ def _run_clean_flow(
             append_session(session)
 
     _echo("")
-    summary = (
-        f"完成：删除 {green(str(result['deleted']))} 项, "
-        f"跳过/失败 {yellow(str(result['failed']))} 项, "
-        f"释放约 {green(format_size(result['freed']))}。"
-    )
-    if result.get("skipped"):
-        partial = result["skipped"]
-        summary += f" {dim(f'（另有 {partial} 个目录部分清理，剩余文件被占用）')}"
-    if result.get("recycled"):
-        recycled_txt = format_size(result["recycled"])
-        summary += (
-            f" {dim(f'（另有 {recycled_txt} 已移入回收站，'
-                     f'清空回收站后才真正释放）')}"
-        )
-    if result.get("skipped_in_use"):
-        in_use = result["skipped_in_use"]
-        summary += f" {dim(f'（{in_use} 项目标因被运行中程序占用而跳过）')}"
-    if result.get("vanished"):
-        # v0.9.10：扫描后、删除前就已消失的目标如实报出，不再混进"删除 N 项"
-        gone = result["vanished"]
-        summary += f" {dim(f'（{gone} 项目标在扫描后已不存在，无需清理）')}"
-    _echo(summary)
+    _echo(_format_clean_result_summary(result, mode))
+    _print_clean_next_steps(result, mode)
     _print_disk_free(selected)
     return result
 
@@ -939,28 +1108,34 @@ def _interactive(
     show_progress: bool = True,
     deep: bool = False,
     workers: int = 0,
+    raw_argv: list[str] | None = None,
 ) -> int:
     """交互式菜单：选择 -> 预览 -> 确认 -> 清理，可循环继续。
 
     ``deep``：传入 ``--deep`` 标志，每轮循环重新加载 rules.json / 配置
     （热重载：编辑规则或配置后无需重启，下一轮扫描即生效）。
     ``workers``：并行扫描线程数（>1 时多线程扫描，结果顺序不变）。
+    ``raw_argv``：原命令行参数，供菜单 ``e`` 提权重启时原样转发。
     """
     from .scanner import print_tree_report
 
     _echo("")
     _echo(bold(f"=== PC Junk Cleaner v{__version__} ==="))
-    if recycle_available():
-        _echo(green("  回收站支持: 是（删除可恢复）"))
+    if mode is CleanMode.RECYCLE:
+        if recycle_available():
+            _echo(green("  删除方式: 进回收站（可恢复，可用 u 撤销）"))
+        else:
+            _echo(yellow("  删除方式: 回收站不可用，本次只能永久删除（不可恢复）"))
     else:
-        _echo(yellow("  回收站支持: 否（将永久删除，请谨慎！建议 pip install send2trash）"))
+        _echo(red("  删除方式: 永久删除（不可恢复，请仔细核对预览）"))
     if is_admin():
         admin_line = green("  管理员权限: 是")
         if is_elevated():
             admin_line += dim(" [UAC 提权]")
         _echo(admin_line)
     else:
-        _echo(yellow("  管理员权限: 否（系统深度清理分类将跳过，可用 --admin 提权）"))
+        _echo(yellow("  管理员权限: 否（系统分类已跳过；按 e 以管理员重启）"))
+    _echo(dim("  快速开始: 输入 p 一键推荐清理；输入 h 查看全部操作"))
 
     # 本机环境适配一行（只读探测：浏览器 / GPU / 微信 / Steam / pnpm store）
     _print_env_adaptation()
@@ -1025,12 +1200,13 @@ def _interactive(
 
         selected: list[CategoryResult] = []
         empty_bin = False
+        compact_preview = False
 
         while True:
             try:
                 choice = input(
-                    "请选择（编号/all/r/d/t/s/x/f/h/q）: "
-                    if n else "请选择（all/r/d/t/s/x/f/h/q）: "
+                    "请选择（编号/p/all/r/h，更多按 h）: "
+                    if n else "请选择（p/all/r/h）: "
                 ).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
@@ -1040,6 +1216,8 @@ def _interactive(
             if not choice:
                 continue
 
+            cmd_raw = choice.split()
+            first_raw = cmd_raw[0] if cmd_raw else ""
             cmd = choice.lower().split()
             action = cmd[0]
 
@@ -1051,8 +1229,11 @@ def _interactive(
                 _print_menu_status(mode, show_risky, scan_depth, workers, deep, bin_size)
                 _echo(dim("  操作: "))
                 _echo(dim("    编号 如 1,3-5   选择要清理的分类（逗号/区间分隔，可多选）"))
-                _echo(dim("    all / a         选中所有非高风险分类（不含回收站）"))
+                _echo(dim("    all / a         选中所有非高风险分类（不含回收站和下载类等单独确认项）"))
                 _echo(dim("    r               连回收站一起清空（不可恢复）"))
+                _echo(dim("    p               一键推荐清理（安全项 + 常用缓存）"))
+                _echo(dim("    D（大写）       切换深度模式并重新扫描（含 Office/Adobe/开发缓存）"))
+                _echo(dim("    e               以管理员身份重启（UAC，系统分类需要）"))
                 _echo(dim("    0               清空当前选择"))
                 _echo(dim("    d <编号>        查看该分类的详细目标列表（d 不带编号=全部）"))
                 _echo(dim("    t <编号>        以树形视图展示"))
@@ -1086,6 +1267,43 @@ def _interactive(
                 except Exception as exc:  # noqa: BLE001
                     _echo(red(f"  撤销失败: {exc}"))
                 continue
+
+            # D（大写）→ 切换深度模式并重扫（v0.9.14）
+            if first_raw in ("D", "deep", "深度"):
+                deep = not deep
+                base_depth = getattr(args, "max_depth", None)
+                if base_depth is None:
+                    base_depth = int(cfg.get("scan_depth", 20) or 20)
+                scan_depth = max(base_depth, 50) if deep else base_depth
+                if deep:
+                    _echo(green("  已开启深度模式，将重新扫描 Office/Adobe/开发缓存等更多位置。"))
+                else:
+                    _echo(dim("  已关闭深度模式，恢复标准扫描。"))
+                refresh_requested = True
+                break
+
+            # e → 以管理员身份重启（v0.9.14）
+            if action in ("e", "elevate", "admin"):
+                if is_admin():
+                    _echo(green("  当前已经是管理员权限。"))
+                    continue
+                _echo(yellow("  将请求管理员权限（UAC）并重新启动；当前窗口会退出。"))
+                from .commands import _relaunch_as_admin
+                rc = _relaunch_as_admin(_menu_relaunch_argv(raw_argv, deep=deep))
+                if rc == 0:
+                    return 0
+                _echo(yellow("  提权未完成，继续以当前权限运行。"))
+                continue
+
+            # p → 一键推荐清理（v0.9.14）
+            if action in ("p", "recommend", "推荐"):
+                rec = recommended_categories(results)
+                if not rec:
+                    _echo(yellow("  当前没有可推荐的安全清理项；可用编号选择，或按 D 深度扫描。"))
+                    continue
+                selected = rec
+                compact_preview = True
+                break
 
             # d <编号> → 查看详细（编号对应汇总表里的可选项）
             if action == "d":
@@ -1156,13 +1374,19 @@ def _interactive(
                 _echo("  已清空选择。")
                 continue
             if sel["all"]:
-                sel["indexes"] = set(range(1, n + 1))
+                sel["indexes"] = {
+                    i for i in range(1, n + 1)
+                    if not results[rows[i - 1]].all_excluded
+                }
+                if not sel["indexes"]:
+                    _echo(dim("  当前没有可全选的分类；下载类请用编号单独选择。"))
+                    continue
             if sel["indexes"] or sel["recycle"]:
                 selected = [results[rows[i - 1]] for i in sorted(sel["indexes"])]
                 empty_bin = sel["recycle"]
                 break
 
-            _echo(red("  无效输入，请重新选择（编号/all/r/d/t/s/x/f/h/q）。"))
+            _echo(red("  无效输入，请重新选择（编号/p/all/r/d/t/s/x/D/e/f/h/q）。"))
 
         # 过滤掉没有内容的分类
         selected = [r for r in selected if r.targets]
@@ -1170,6 +1394,8 @@ def _interactive(
             _echo(yellow("  所选分类没有可清理的内容。"))
             continue
 
+        if compact_preview:
+            _print_recommended_overview(selected, results)
         ext_filter, min_size_bytes, older_than_secs, shred_passes = _filters_from_args(args)
         flow_result = _run_clean_flow(
             selected,
@@ -1184,6 +1410,7 @@ def _interactive(
             ext_filter=ext_filter,
             min_size_bytes=min_size_bytes,
             older_than_secs=older_than_secs,
+            show_preview=not compact_preview,
         )
 
         # v0.9.8：用户取消（或所选分类被过滤空了）时**回到菜单**，而不是逼他
@@ -1194,6 +1421,9 @@ def _interactive(
             _echo(dim("  已取消，返回菜单（可按 f 重新扫描）。"))
             continue
 
+        if not is_admin() and any(r.admin_blocked for r in results):
+            blocked_n = sum(1 for r in results if r.admin_blocked)
+            _echo(dim(f"  另有 {blocked_n} 个分类需管理员权限：按 e 提权重启后可清理。"))
         # 完成后：默认**不**重扫，直接回到菜单（结果已是最新占用情况）；
         # 需要重新扫描时按 f 主动触发。
         _echo("")

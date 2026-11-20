@@ -45,22 +45,22 @@ v0.9.10 修复：
 from __future__ import annotations
 
 import fnmatch
+import logging
 import os
 import sys
+import textwrap
 import time
-import logging
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from .models import CategoryResult, Target, TargetAction, TargetKind, format_size  # noqa: F401
 from .rules import (
     DEFAULT_SKIP_DIRNAMES,
-    _expand_vars_cross_platform,   # v0.9.5：POSIX 上也展开 %VAR% 规则占位符
+    _expand_vars_cross_platform,  # v0.9.5：POSIX 上也展开 %VAR% 规则占位符
     category_label,
     get_protected_patterns,
     is_within_clear_root,
     spec_requires_admin,
-    SYSTEM_CRITICAL_FILES,      # 安全增强：系统关键文件黑名单（虽然扫描器不删除，但传递给引擎）
 )
 
 # ===========================================================================
@@ -519,7 +519,8 @@ def _pattern_matches_dir(base: Path, candidate: Path, pattern: str) -> bool:
         return False
     tail = rel_parts[len(rel_parts) - len(pat_parts):]
     return all(
-        fnmatch.fnmatch(c.lower(), p.lower()) for c, p in zip(tail, pat_parts)
+        fnmatch.fnmatch(c.lower(), p.lower())
+        for c, p in zip(tail, pat_parts, strict=True)
     )
 
 
@@ -554,6 +555,26 @@ def _is_file_safe(p: Path) -> bool:
         return False
 
 
+def _has_extracted_sibling_dir(path: Path) -> bool:
+    """判断压缩包旁边是否有同名解压目录（``foo.zip`` → ``foo/``）。
+
+    仅用于 ``require_extracted_sibling`` 规则：只有用户已经解压过、原始压缩包
+    才更可能是残留。支持 ``foo.tar.gz`` 这类多级后缀，逐级去掉后缀检查。
+    """
+    stem = path.name
+    while "." in stem:
+        stem = stem.rsplit(".", 1)[0]
+        if not stem:
+            break
+        candidate = path.with_name(stem)
+        try:
+            if candidate.is_dir() and not is_reparse_point(candidate):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _filter_and_build_file_targets(
     file_paths: Iterator[Path],
     category_key: str,
@@ -563,6 +584,7 @@ def _filter_and_build_file_targets(
     label: str = "",
     ext_filter: set[str] | None = None,
     skip_if_in_use: bool = False,
+    require_extracted_sibling: bool = False,
 ) -> list[Target]:
     """从文件路径迭代器中筛选符合条件的文件，构造 Target 列表。
 
@@ -577,6 +599,7 @@ def _filter_and_build_file_targets(
         older_than_secs: 最旧修改时间阈值（秒），0 表示不限制
         label: 目标标签
         ext_filter: 允许的扩展名集合（小写、带点），None 表示不限制
+        require_extracted_sibling: 只保留旁边存在同名解压目录的压缩包
 
     Returns:
         list[Target]: 满足条件的文件 Target 列表
@@ -593,6 +616,8 @@ def _filter_and_build_file_targets(
             # v0.9.3：链接指向的文件不当作本地文件（体积虚高 + 删除必然失败）
             continue
         if is_protected(p):
+            continue
+        if require_extracted_sibling and not _has_extracted_sibling_dir(p):
             continue
         if ext_filter is not None and p.suffix.lower() not in ext_filter:
             continue
@@ -864,6 +889,7 @@ def _scan_glob_files(
         label=label,
         ext_filter=_parse_ext_set(spec),
         skip_if_in_use=bool(spec.get("skip_if_in_use")),
+        require_extracted_sibling=bool(spec.get("require_extracted_sibling")),
     )
 
 
@@ -1147,7 +1173,7 @@ def _scan_broken_shortcuts(
     ``exclude_dirs``：排除某些目录名（如 ``Startup``），避免动开机启动项。
     ``bases``：候选根目录列表（用户开始菜单 / 公共开始菜单 / 桌面 / 快速启动）。
     """
-    from .lnk import V_BROKEN, V_INVALID, V_UNAVAILABLE, V_UNKNOWN, classify, parse_shortcut
+    from .lnk import V_BROKEN, V_UNAVAILABLE, classify, parse_shortcut
 
     raw_bases: list[str] = []
     if isinstance(spec.get("base"), str) and spec["base"]:
@@ -1444,6 +1470,8 @@ def scan_spec(
         label=label,
         risk=str(spec.get("risk") or "safe"),
         requires_admin=spec_requires_admin(spec),
+        all_excluded=bool(spec.get("all_excluded", False)),
+        note=str(spec.get("note") or ""),
     )
 
     if on_progress:
@@ -1458,6 +1486,9 @@ def scan_spec(
 
     collected = _collect_spec_targets(spec, is_protected, scan_depth, size_memo, result)
     result.targets, _dropped = _drop_subsumed(collected)
+    if spec.get("partial_if_in_use"):
+        for target in result.targets:
+            target.partial_if_in_use = True
     result.scanned = True
     result.scan_duration = time.time() - t0
     return result
@@ -1528,6 +1559,7 @@ def scan_all(
                         key=str(spec.get("key") or "?"),
                         label=spec.get("label") or category_label(str(spec.get("key") or "?")),
                         risk=str(spec.get("risk") or "safe"),
+                        note=str(spec.get("note") or ""),
                         scanned=True,
                     )
                 slots[idx] = result
@@ -1694,7 +1726,7 @@ def print_detail_report(
     sort_by: 'size_desc' | 'size_asc' | 'name_asc' | 'count_desc'
     max_items: 每个分类最多展示条数，0 表示不限制
     """
-    from .console import bold, cyan, dim, green, red, yellow, pad_cjk, separator
+    from .console import bold, cyan, dim, green, red, separator, yellow
 
     print("")
     print(bold("╔══════════════════════════════════════════════════════════╗"))
@@ -1747,6 +1779,15 @@ def print_detail_report(
 
         print(f"  {badge} {bold(res.label)}{admin_tag}")
         print(f"    {dim(f'{len(targets)} 个目标, {cat_count} 个文件, 可释放 {green(format_size(cat_size))}')}")
+        if res.note:
+            from .console import get_terminal_width
+            note = " ".join(res.note.split())
+            width = max(20, (get_terminal_width() - 8) // 2)
+            print(dim("    说明:"))
+            for line in textwrap.wrap(
+                note, width=width, break_long_words=False, break_on_hyphens=False
+            ):
+                print(dim("      " + line))
         print(f"    {dim('─' * 60)}")
 
         for i, t in enumerate(shown, 1):
@@ -1781,7 +1822,7 @@ def print_detail_report(
 
 def print_tree_report(results: list[CategoryResult]) -> None:
     """以树形结构展示扫描结果。"""
-    from .console import bold, cyan, dim, green, red, yellow
+    from .console import bold, dim, green, red, yellow
 
     print("")
     print(bold("📁 扫描结果（树形视图）"))
@@ -1814,7 +1855,7 @@ def print_tree_report(results: list[CategoryResult]) -> None:
             if t.kind is TargetKind.DIR:
                 print(f"  │  {'│' if i < len(targets) - 1 else ' '}     {dim(f'{t.file_count} 文件, {t.action_label}')}")
 
-        print(f"  │")
+        print("  │")
         print("")
 
     print(f"  {bold(f'合计可释放: {green(format_size(total_size))}')}")

@@ -1,2 +1,0 @@
-[console_scripts]
-pc-junk-cleaner = pc_cleaner.cli:main

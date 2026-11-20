@@ -62,6 +62,21 @@ from .commands import (
 from .config import load_config, resolve_workers, save_config
 from .console import dim, red, yellow
 from .engine import CleanMode, delete_targets, empty_recycle_bin, recycle_available
+from .menu import (  # 从 menu 导入所有需要的交互函数，包括 _filters_from_args
+    _apply_target_filters,
+    _collect_targets,
+    _filters_from_args,  # 现在由 menu 提供
+    _interactive,
+    # 向后兼容：测试/旧调用仍可从 cli 导入这两个名字。
+    _parse_ext_filter,  # noqa: F401
+    _parse_selection,  # noqa: F401
+    _print_disk_free,
+    _progress_line,
+    _run_clean_flow,
+)
+from .models import CategoryResult, format_size
+from .rules import get_enabled_category_specs
+from .scanner import is_admin, print_detail_report, recycle_bin_size, scan_all
 from .service import (
     EXIT_DELETE_FAILED,
     EXIT_ERROR,
@@ -73,20 +88,6 @@ from .service import (
     envelope,
     exit_code_for,
 )
-from .menu import (          # 从 menu 导入所有需要的交互函数，包括 _filters_from_args
-    _apply_target_filters,
-    _collect_targets,
-    _filters_from_args,      # 现在由 menu 提供
-    _interactive,
-    _parse_ext_filter,
-    _parse_selection,
-    _print_disk_free,
-    _progress_line,
-    _run_clean_flow,
-)
-from .models import CategoryResult, format_size
-from .rules import get_enabled_category_specs
-from .scanner import is_admin, print_detail_report, recycle_bin_size, scan_all
 from .ui import (
     ScanProgressDisplay,
     _echo,
@@ -167,7 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
     clean_group.add_argument("--clean", metavar="KEY[,KEY...]",
                             help="直接清理指定分类（如 system_temp,web_cache；支持 recycle_bin）")
     clean_group.add_argument("--all", action="store_true",
-                            help="选中所有非高风险分类（默认不含回收站，见 all_includes_recycle_bin）")
+                            help="选中所有非高风险分类（默认不含回收站、下载类等需单独确认的分类）")
     clean_group.add_argument("--exclude", metavar="KEY[,KEY...]",
                             help="与 --all/--clean 联用：排除指定分类")
     clean_group.add_argument("--dry-run", action="store_true", help="只预览，不真正删除")
@@ -464,6 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         return _interactive(
             results, specs, mode, args, cfg, show_risky,
             sort_by, scan_depth, show_progress, deep=args.deep, workers=workers,
+            raw_argv=argv if argv is not None else sys.argv[1:],
         )
 
     # --- 选择分类 ---
@@ -479,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
         _echo("可用分类: " + ", ".join(r.key for r in results))
         return EXIT_ERROR
     if args.all:
-        selected = [r for r in results if r.key.lower() not in excluded]
+        selected = [r for r in results if not r.all_excluded and r.key.lower() not in excluded]
         # 安全默认：--all 不再隐式清空回收站（清空不可恢复），
         # 需显式 --clean recycle_bin 或配置 all_includes_recycle_bin=true
         empty_bin = bool(cfg.get("all_includes_recycle_bin", False)) and "recycle_bin" not in excluded
@@ -692,6 +694,7 @@ def _json_stdout_mode(
                 "risk": r.risk,
                 "requires_admin": r.requires_admin,
                 "admin_blocked": r.admin_blocked,
+                "note": r.note,
                 "count": r.total_count,
                 "target_count": len(r.targets),
                 "size_bytes": r.liberatable,
@@ -710,7 +713,10 @@ def _json_stdout_mode(
     # v0.9.4：用 `is not None` 判断，`--clean ""` 也要进入分支（随后报错）
     if args.clean is not None or args.all:
         if args.all:
-            keys = [r.key for r in results if show_risky or r.risk != "risky"]
+            keys = [
+                r.key for r in results
+                if (show_risky or r.risk != "risky") and not r.all_excluded
+            ]
             # 与交互模式保持一致：--all 默认不含回收站，避免自动化场景误清空
             if cfg.get("all_includes_recycle_bin", False):
                 keys.append("recycle_bin")

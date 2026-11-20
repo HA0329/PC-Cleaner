@@ -26,7 +26,6 @@ import types
 from pathlib import Path
 
 import pytest
-
 from pc_cleaner import cli as cli_mod
 from pc_cleaner import history as history_mod
 from pc_cleaner.engine import (
@@ -47,8 +46,8 @@ from pc_cleaner.scanner import (
 )
 from pc_cleaner.service import (
     EXIT_DELETE_FAILED,
-    EXIT_NEEDS_CONFIRM,
     EXIT_INTERRUPTED,
+    EXIT_NEEDS_CONFIRM,
     EXIT_OK,
     dangerous_reasons,
     envelope,

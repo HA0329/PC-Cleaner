@@ -6,10 +6,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
-
 from pc_cleaner.env import wechat_data_summary
 from pc_cleaner.menu import (
     _parse_selection,

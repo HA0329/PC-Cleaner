@@ -15,7 +15,6 @@ import re
 import time
 
 import pytest
-
 from pc_cleaner import ui
 from pc_cleaner.models import CategoryResult, Target, TargetAction, TargetKind
 from pc_cleaner.ui import (

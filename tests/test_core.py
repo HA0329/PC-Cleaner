@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import os
-
-import pytest
-
 from pc_cleaner.models import TargetAction, TargetKind, format_size
 from pc_cleaner.scanner import (
     _dir_size,
-    _scan_find_dirs,
-    _scan_files_by_rule,
     expand_path,
     make_protect_check,
     scan_spec,

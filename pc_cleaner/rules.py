@@ -272,7 +272,7 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "gpu_caches": {
         "label": "GPU 着色器缓存",
-        "description": "NVIDIA / AMD / DirectX 着色器缓存，可安全清理并自动重建",
+        "description": "NVIDIA / AMD / Intel / DirectX 着色器缓存，可安全清理并自动重建",
         "risk": "safe",
     },
     "nvidia_app_cache": {
@@ -282,7 +282,7 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "web_cache": {
         "label": "浏览器/网页缓存",
-        "description": "Edge、Chrome、Firefox、Brave、Vivaldi、Opera、Steam 网页缓存、INetCache",
+        "description": "Edge、Chrome、Firefox、Brave、Vivaldi、Opera、QQ 浏览器、搜狗浏览器、Steam 网页缓存、INetCache",
         "risk": "safe",
     },
     "wechat_cache": {
@@ -302,7 +302,7 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "comm_caches": {
         "label": "通信工具缓存",
-        "description": "Zoom / Discord / Telegram 等通信应用临时缓存",
+        "description": "Zoom / Discord / Telegram / Slack / Teams / 飞书等通信应用临时缓存",
         "risk": "safe",
     },
     "game_caches": {
@@ -327,8 +327,23 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "downloads": {
         "label": "下载/旧文件",
-        "description": "Downloads 中的大文件/久未使用文件/安装包（高风险，需确认）",
+        "description": "Downloads 中 100MB+ 且 180 天未修改的大/旧文件（高风险，需确认）",
         "risk": "risky",
+    },
+    "downloads_temp": {
+        "label": "未完成下载/下载残片",
+        "description": "Downloads 根目录的 .crdownload/.part 等 7 天未修改残片",
+        "risk": "moderate",
+    },
+    "downloads_installers": {
+        "label": "下载的安装包/镜像/压缩包",
+        "description": "Downloads 根目录 90/180 天未修改的 exe/msi/iso/zip 等；不随 --all 选中",
+        "risk": "moderate",
+    },
+    "downloads_extracted": {
+        "label": "已解压的下载压缩包",
+        "description": "压缩包旁存在同名解压目录时才清理；不随 --all 选中",
+        "risk": "moderate",
     },
     "recycle_bin": {
         "label": "回收站",
@@ -337,7 +352,12 @@ CATEGORY_META: dict[str, dict[str, Any]] = {
     },
     "system_admin": {
         "label": "系统深度清理(需管理员)",
-        "description": "Windows 更新缓存、系统 Temp、chkdsk 残留、更新日志、预读取、事件日志、崩溃转储",
+        "description": "Windows 更新缓存、系统 Temp、chkdsk 残留、更新日志、预读取、事件日志、崩溃转储、$WinREAgent、设备元数据缓存",
+        "risk": "moderate",
+    },
+    "system_wer": {
+        "label": "Windows 错误报告归档(需管理员)",
+        "description": "ProgramData 下的 WER 报告归档/队列/临时文件",
         "risk": "moderate",
     },
     "system_logs": {
@@ -788,7 +808,7 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
     except Exception:  # noqa: BLE001 校验不应因扫描器导入失败而中断
         def _pattern_matches_dir(*_args, **_kwargs) -> bool:  # type: ignore[misc]
             return False
-    dead: list[tuple[str, str]] = []
+    dead: list[tuple[str, str, str, bool, Any | None]] = []
     for cat in specs:
         if not isinstance(cat, dict):
             continue
@@ -903,7 +923,7 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
     for loc, raw, norm, base_ok, pat in dead:
         grouped.setdefault((norm, pat, base_ok), []).append((loc, raw))
 
-    base_missing = sum(1 for (n, _p, ok) in grouped if not ok)
+    base_missing = sum(1 for (_n, _p, ok) in grouped if not ok)
     base_present = len(grouped) - base_missing
     warnings.append(
         f"本机存活性审计：{len(dead)} 条规则在本机匹配不到任何内容，"
@@ -919,7 +939,7 @@ def _warn_dead_targets(specs, warnings: list[str]) -> None:
     ordered = sorted(
         grouped.items(), key=lambda kv: (not kv[0][2], -len(kv[1]))
     )
-    for (norm, pat, base_ok), items in ordered[:10]:
+    for (_norm, pat, base_ok), items in ordered[:10]:
         loc, raw = items[0]
         pat_txt = f"  pattern={pat!r}" if pat else ""
         dup = f"（另有 {len(items) - 1} 条重复规则）" if len(items) > 1 else ""
@@ -1039,6 +1059,10 @@ def validate_rules(
             errors.append(f"[{key}] 非法 risk: {risk!r}（应为 safe/moderate/risky）")
         if not cat.get("label"):
             errors.append(f"[{key}] 缺少 label")
+        if "all_excluded" in cat and not isinstance(cat["all_excluded"], bool):
+            errors.append(f"[{key}] all_excluded 必须是布尔值")
+        if "partial_if_in_use" in cat and not isinstance(cat["partial_if_in_use"], bool):
+            errors.append(f"[{key}] partial_if_in_use 必须是布尔值")
 
         targets = cat.get("targets", [])
         if not isinstance(targets, list) or not targets:
@@ -1053,6 +1077,11 @@ def validate_rules(
             if ttype not in VALID_TARGET_TYPES:
                 errors.append(f"{loc} 非法 type: {ttype!r}")
                 continue
+            if "require_extracted_sibling" in t:
+                if ttype != "glob_files":
+                    errors.append(f"{loc} require_extracted_sibling 仅适用于 glob_files")
+                elif not isinstance(t["require_extracted_sibling"], bool):
+                    errors.append(f"{loc} require_extracted_sibling 必须是布尔值")
             # v0.9.8：clear_dir/delete_dir 支持 `paths`（多候选路径），
             # glob_dirs 支持 `bases`（多候选基目录），用于兼容同一软件的不同
             # 版本目录布局。二者与原有单数写法等价，至少给出其一即可。

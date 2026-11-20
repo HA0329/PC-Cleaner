@@ -17,7 +17,7 @@ echo.
 rem v0.9.3: force UTF-8 so Chinese/emoji do not crash on a cp936 console
 set "PYTHONUTF8=1"
 
-rem --- locate a Python 3.10+ interpreter ---
+rem --- locate a Python 3.12+ interpreter ---
 rem v0.9.3: prefer "py -3" (the Microsoft Store python stub breaks the version check)
 set "PY="
 where py >nul 2>nul && set "PY=py -3"
@@ -25,7 +25,7 @@ if not defined PY (
   where python >nul 2>nul && set "PY=python"
 )
 if not defined PY (
-  echo [ERROR] Python not found. Install Python 3.10+ first.
+  echo [ERROR] Python not found. Install Python 3.12+ first.
   echo.
   pause >nul
   exit /b 1

@@ -42,26 +42,26 @@ v0.9.10 安全修复：
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import shutil
 import sqlite3
 import sys
-import logging
 from pathlib import Path
 from typing import Any, Callable
 
 from .config import load_config
 from .models import CleanMode, Target, TargetAction, TargetKind, format_size
 from .rules import (
-    is_clear_root,
     SYSTEM_CRITICAL_FILES,  # 安全增强
+    is_clear_root,
 )
 
 # ===========================================================================
 # 可选依赖：send2trash
 # ===========================================================================
 try:  # 可选依赖：删除到回收站
-    import send2trash  # type: ignore
+    import send2trash
     HAS_SEND2TRASH = True
 except Exception:  # noqa: BLE001
     send2trash = None
@@ -120,7 +120,7 @@ def _guard_path(path: Path, is_protected, action: TargetAction) -> None:
     try:
         real = path.resolve(strict=False)
     except (OSError, ValueError):
-        raise PermissionError(f"无法解析路径: {path}")
+        raise PermissionError(f"无法解析路径: {path}") from None
 
     # 2. 拒绝删除磁盘根路径
     if real == Path(real.anchor) or len(real.parts) <= 1:
@@ -206,7 +206,7 @@ def _rmtree(path: Path) -> None:
         try:
             os.chmod(target, 0o700)
         except OSError:
-            raise exc
+            raise exc from None
         try:
             func(target)
         except OSError:
@@ -239,7 +239,7 @@ def _delete_path(
     try:
         real = path.resolve(strict=False)
     except (OSError, ValueError):
-        raise PermissionError(f"无法解析路径: {path}")
+        raise PermissionError(f"无法解析路径: {path}") from None
 
     # 重解析点保护：不跟随、也不删除链接本身
     from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
@@ -475,12 +475,18 @@ def delete_targets(
             # v0.9.3：规则声明 skip_if_in_use 时，目标被运行中进程占用就跳过。
             # 典型场景：npm _npx 里正跑着 npx 安装的 CLI / AI 工具，
             # 清掉会让它们"当场不报错、下次启动才崩"。
+            in_use_reason = ""
             if t.skip_if_in_use:
-                reason = _in_use_reason(t.path)
-                if reason:
+                in_use_reason = _in_use_reason(t.path)
+                # v0.9.13：缓存/临时目录在程序运行时不再整目标跳过；
+                # 只对未锁定子项逐项清理，锁定项由 _clear_dir_content 跳过。
+                # npm _npx、系统更新缓存等危险目标仍保持整目标跳过。
+                if in_use_reason and not (
+                    t.action is TargetAction.CLEAR and t.partial_if_in_use
+                ):
                     skipped_in_use += 1
                     audit(t.path, 0, "skipped_in_use", 0)
-                    on_progress(i, total, f"[跳过] {t.path}（正被进程占用: {reason}）")
+                    on_progress(i, total, f"[跳过] {t.path}（正被进程占用: {in_use_reason}）")
                     continue
 
             if t.action is TargetAction.COMPACT:
@@ -534,9 +540,16 @@ def delete_targets(
                     freed += freed_here
                     audit(t.path, t.size, mode.value, freed_here)
                 if clear_failed and freed_here == 0:
-                    # 一个都没删掉：计入失败，避免"假装成功"
-                    failed += 1
-                    on_progress(i, total, f"[跳过] {t.path}（{clear_failed} 个子项被占用）")
+                    # 一个都没删掉：计入失败/占用，避免"假装成功"
+                    if in_use_reason:
+                        skipped_in_use += 1
+                        on_progress(
+                            i, total,
+                            f"[跳过] {t.path}（正被进程占用，未能清理任何子项: {in_use_reason}）",
+                        )
+                    else:
+                        failed += 1
+                        on_progress(i, total, f"[跳过] {t.path}（{clear_failed} 个子项被占用）")
                     continue
                 if clear_failed:
                     skipped += 1
@@ -630,7 +643,7 @@ def compact_database(path: Path) -> int:
     try:
         before = path.stat().st_size
     except OSError:
-        raise PermissionError(f"无法访问数据库: {path}")
+        raise PermissionError(f"无法访问数据库: {path}") from None
     # v0.9.3：VACUUM 需要约 1 倍库大小的临时空间，空间不足时直接拒绝，
     # 避免白耗时间/写满磁盘（SQLite 会回滚，但用户看到的是"压缩失败"）。
     try:
@@ -648,9 +661,11 @@ def compact_database(path: Path) -> int:
         finally:
             con.close()
     except sqlite3.Error as exc:
-        raise PermissionError(f"数据库压缩失败（可能被占用或非 SQLite）: {exc}")
+        raise PermissionError(
+            f"数据库压缩失败（可能被占用或非 SQLite）: {exc}"
+        ) from exc
     except OSError as exc:
-        raise PermissionError(f"数据库压缩失败: {exc}")
+        raise PermissionError(f"数据库压缩失败: {exc}") from exc
     try:
         after = path.stat().st_size
     except OSError:
@@ -832,14 +847,14 @@ def restore_paths(paths: list[str], drives: list[str] | None = None) -> dict[str
             return str(p).lower()
 
     by_orig: dict[str, dict] = {}
-    for e in entries:
-        raw = str(e["original"]).lower()
-        by_orig.setdefault(raw, e)
+    for entry in entries:
+        raw = str(entry["original"]).lower()
+        by_orig.setdefault(raw, entry)
         # 同时登记解析后的写法，兼容历史记录里存的是长名、回收站存的是短名
         # （或反之）的情况。
-        canon = _canon(e["original"])
+        canon = _canon(entry["original"])
         if canon != raw:
-            by_orig.setdefault(canon, e)
+            by_orig.setdefault(canon, entry)
 
     def _restore_one(e: dict, target: Path, requested: Path) -> None:
         """把一条回收站记录还原到 ``target``（记录内已确认 target 不存在）。"""

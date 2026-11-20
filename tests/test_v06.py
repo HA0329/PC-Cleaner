@@ -6,8 +6,6 @@ import os
 import time
 from types import SimpleNamespace
 
-import pytest
-
 from pc_cleaner.cli import _apply_target_filters, _filters_from_args, _parse_ext_filter
 from pc_cleaner.engine import _shred_file
 from pc_cleaner.models import Target, TargetAction, TargetKind
@@ -75,7 +73,7 @@ def test_deep_mode_gates_deep_only_targets():
     # 既有标签仍在（规则外置未丢失；v0.9.5：Prefetch 标签带提示后缀，改前缀匹配）
     labels = [t.get("label") for t in normal["system_admin"]["targets"]]
     assert "Windows 更新缓存" in labels
-    assert any(str(l).startswith("预读取(Prefetch)") for l in labels)
+    assert any(str(label).startswith("预读取(Prefetch)") for label in labels)
 
 
 # ---------------------------------------------------------------------------

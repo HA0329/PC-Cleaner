@@ -22,7 +22,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from pc_cleaner import config as cfg_mod
 from pc_cleaner.engine import CleanMode, delete_targets
 from pc_cleaner.models import Target, TargetAction, TargetKind

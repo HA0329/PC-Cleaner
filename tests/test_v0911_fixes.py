@@ -26,9 +26,8 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from pc_cleaner.config import audit_path, history_path
-from pc_cleaner.engine import _parse_recycle_info, CleanMode, delete_targets
+from pc_cleaner.engine import CleanMode, _parse_recycle_info, delete_targets
 from pc_cleaner.history import (
     append_session,
     load_history,

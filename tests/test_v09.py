@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from pc_cleaner.engine import CleanMode, compact_database, delete_targets
 from pc_cleaner.models import Target, TargetAction, TargetKind
 from pc_cleaner.rules import get_all_category_specs, validate_rules

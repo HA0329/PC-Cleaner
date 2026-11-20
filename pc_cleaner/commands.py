@@ -27,8 +27,15 @@ from typing import Any
 from . import __version__
 from .config import DEFAULTS, load_config, update_config
 from .console import (
-    bold, cyan, dim, green, red, yellow, magenta,
-    pad_cjk, separator, progress_bar,
+    bold,
+    cyan,
+    dim,
+    green,
+    magenta,
+    progress_bar,
+    red,
+    separator,
+    yellow,
 )
 from .engine import CleanMode, recycle_available, restore_paths
 from .history import load_history
@@ -492,6 +499,7 @@ def _cmd_export_scan(results, path: str) -> int:
             "risk": r.risk,
             "requires_admin": r.requires_admin,
             "admin_blocked": r.admin_blocked,
+            "note": r.note,
             "target_count": len(r.targets),
             "file_count": r.total_count,
             "size_bytes": r.liberatable,

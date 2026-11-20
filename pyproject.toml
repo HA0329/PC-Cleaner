@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pc-junk-cleaner"
-version = "0.9.11"
+version = "0.9.16"
 description = "为个人电脑定制的安全垃圾清理工具 (Windows 优先)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -35,8 +35,8 @@ dependencies = ["send2trash>=1.8"]
 [project.optional-dependencies]
 # 兼容旧写法：send2trash 已是必需依赖，此 extra 保留为空
 recycle = []
-dev = ["pytest>=7"]
-all = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.6", "mypy>=1.10"]
+all = ["pytest>=7", "ruff>=0.6", "mypy>=1.10"]
 
 [project.scripts]
 pc-junk-cleaner = "pc_cleaner.cli:main"
@@ -50,3 +50,28 @@ pc_cleaner = ["rules.json", "locales/*.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["pc_cleaner", "tests"]
+
+[tool.ruff.lint]
+# 只用一组稳定、低争议的规则：语法错误 / 未使用 / 导入顺序 / 常见 bug。
+# 格式类规则（E501、引号、缩进）不在这里强制，避免把历史代码一次性全重排。
+select = ["E4", "E7", "E9", "F", "I", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# __main__.py 必须在导入 cli 之前完成 Python 版本 / Windows 平台门禁。
+"pc_cleaner/__main__.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+# 本工具只适配 Windows；强制按 win32 解析 msvcrt / winreg 等平台模块。
+platform = "win32"
+files = ["pc_cleaner"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+show_error_codes = true

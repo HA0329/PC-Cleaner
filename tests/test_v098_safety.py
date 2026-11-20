@@ -24,7 +24,6 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
-
 from pc_cleaner import engine, menu, rules, scanner
 from pc_cleaner.console import display_width
 from pc_cleaner.models import (
@@ -387,7 +386,7 @@ class TestMenuXToggleKeepsIndicesConsistent:
             try:
                 return next(it)
             except StopIteration:
-                raise EOFError
+                raise EOFError from None
 
         monkeypatch.setattr(menu, "_run_clean_flow", fake_flow)
         monkeypatch.setattr("builtins.input", fake_input)
@@ -451,7 +450,7 @@ class TestMenuXToggleKeepsIndicesConsistent:
             try:
                 return next(it)
             except StopIteration:
-                raise EOFError
+                raise EOFError from None
 
         class Args:
             dry_run = False

@@ -3,7 +3,7 @@ send2trash>=1.8
 
 # 安装方式（推荐用 pyproject，而不是手动装 requirements）：
 #   pip install -e .            # 运行时
-#   pip install -e ".[dev]"     # 运行时 + pytest
+#   pip install -e ".[dev]"     # 运行时 + pytest + ruff + mypy
 #   pip install -e ".[all]"     # 同上（兼容旧写法）
 #
 # 说明：本文件的唯一作用是给不读 pyproject.toml 的旧工具/CI 一个等价入口。

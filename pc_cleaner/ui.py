@@ -29,7 +29,7 @@ import re
 import sys
 import threading
 import time
-from typing import Any, TextIO
+from typing import Any, Literal, TextIO
 
 from .console import (
     _ANSI,
@@ -337,7 +337,7 @@ class Spinner:
     def __enter__(self) -> "Spinner":
         return self.start()
 
-    def __exit__(self, *_exc: Any) -> bool:
+    def __exit__(self, *_exc: Any) -> Literal[False]:
         self.stop()
         return False
 

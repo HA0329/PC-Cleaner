@@ -36,11 +36,11 @@ import secrets
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Iterable, TextIO
 
 from . import __version__
 from .config import load_config
+from .console import _reconfigure_utf8_stream
 from .engine import CleanMode, delete_targets, restore_paths
 from .history import (
     append_session,
@@ -48,7 +48,9 @@ from .history import (
     make_session,
     record_deletion_audit,
 )
-from .models import Target, TargetAction, TargetKind, format_size
+
+# TargetAction 被测试/旧调用从 mcp 模块直接引用，保留为兼容再导出。
+from .models import Target, TargetAction, TargetKind, format_size  # noqa: F401
 from .rules import get_all_category_specs, get_enabled_category_specs
 from .scanner import scan_all
 from .service import dangerous_reasons
@@ -228,6 +230,7 @@ def _tool_scan(args: dict[str, Any], deep_default: bool) -> dict[str, Any]:
             "risk": r.risk,
             "requires_admin": r.requires_admin,
             "admin_blocked": r.admin_blocked,
+            "note": r.note,
             "target_count": len(r.targets),
             "file_count": r.total_count,
             "size_bytes": r.liberatable,
@@ -787,10 +790,7 @@ def serve(
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     for stream in (stdin, stdout):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 某些流不支持 reconfigure
-            pass
+        _reconfigure_utf8_stream(stream)
     for raw in stdin:
         line = raw.strip()
         if not line:

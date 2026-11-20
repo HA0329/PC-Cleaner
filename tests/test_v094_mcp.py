@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from pc_cleaner import mcp
 from pc_cleaner.models import CategoryResult, Target, TargetAction, TargetKind
 
@@ -141,7 +140,7 @@ def test_serve_framing_and_parse_error():
     out = io.StringIO()
     code = mcp.serve(stdin=io.StringIO("\n".join(lines) + "\n"), stdout=out)
     assert code == 0
-    parsed = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    parsed = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
     assert parsed[0]["result"] == {}
     assert parsed[1]["error"]["code"] == -32700
     assert "tools" in parsed[2]["result"]

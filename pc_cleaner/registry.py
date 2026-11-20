@@ -188,7 +188,7 @@ def _import_winreg():
     if sys.platform != "win32":
         return None
     try:
-        import winreg  # type: ignore
+        import winreg
 
         return winreg
     except Exception:  # noqa: BLE001

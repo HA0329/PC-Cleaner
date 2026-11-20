@@ -13,6 +13,23 @@ import os
 import re
 import sys
 import unicodedata
+from typing import Any
+
+
+def _reconfigure_utf8_stream(stream: Any) -> None:
+    """尽力把单个文本流重配为 UTF-8；不支持的流（StringIO 等）静默跳过。
+
+    先 ``getattr`` 再调用，是因为 ``TextIO`` 类型并不保证有
+    ``reconfigure``，而测试/嵌入场景经常传入 ``io.StringIO``。直接调用只能靠
+    ``AttributeError`` 兜底，既难看，也让类型检查无法收敛。
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if not callable(reconfigure):
+        return
+    try:
+        reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError):
+        pass
 
 
 def _force_utf8_io() -> None:
@@ -23,10 +40,7 @@ def _force_utf8_io() -> None:
     ``--json`` 等输出为合法 UTF-8，又用替换符兜底避免中断。
     """
     for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError, OSError):
-            pass
+        _reconfigure_utf8_stream(stream)
 
 
 _force_utf8_io()

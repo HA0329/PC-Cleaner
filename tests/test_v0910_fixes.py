@@ -27,7 +27,6 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
-
 from pc_cleaner import cli, commands, engine, mcp, rules, scanner, ui
 from pc_cleaner.models import (
     CategoryResult,

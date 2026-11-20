@@ -12,10 +12,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 import pc_cleaner.rules as rules_mod
 import pc_cleaner.scanner as scanner_mod
+import pytest
 from pc_cleaner.engine import _parse_recycle_info
 from pc_cleaner.models import CategoryResult, Target, TargetAction, TargetKind
 from pc_cleaner.rules import (

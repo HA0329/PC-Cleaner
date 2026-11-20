@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import io
-import json
 import os
 import struct
 import sys
@@ -31,7 +30,6 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
-
 from pc_cleaner import lnk, menu, registry, rules, scanner
 from pc_cleaner.models import CleanMode
 

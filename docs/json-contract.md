@@ -1,4 +1,4 @@
-# JSON 契约（v0.9.4 / schema_version = 1）
+# JSON 契约（v0.9.16 / schema_version = 1）
 
 面向脚本与 AI Agent 的稳定输出契约。**字段只增不减**；破坏性变更必须提升
 `schema_version`。机器可读版本：`python -m pc_cleaner --json-schema`。
@@ -13,13 +13,14 @@
   "ok": false,
   "status": "needs_confirmation",
   "exit_code": 4,
-  "version": "0.9.4",
+  "version": "0.9.16",
   "recycle_available": true,
   "admin": true,
   "elevated": false,
   "dry_run": false,
   "categories": [ { "key": "...", "label": "...", "risk": "safe|moderate|risky",
                     "requires_admin": false, "admin_blocked": false,
+                    "note": "分类说明（v0.9.14 新增，字段只增不减）",
                     "count": 12, "target_count": 3,
                     "size_bytes": 123, "size": "123 B" } ],
   "total_size_bytes": 0,

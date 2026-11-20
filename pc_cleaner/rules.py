@@ -66,6 +66,11 @@ DEFAULT_PROTECTED_PATTERNS: list[str] = [
     r"windows\winsxs",
     r"windows\temp",
     r"windows\softwaredistribution",
+    # SECURITY.md 明确承诺不删除系统组件：Windows\Installer 是 MSI 缓存，
+    # DriverStore 是驱动库（虽然已被 windows\system32 覆盖，显式列出避免
+    # 以后调整前缀时静默失效）。
+    r"windows\installer",
+    r"windows\system32\driverstore",
     r"program files\windows nt",
     r"programdata\microsoft\windows defender",
     # 注意（v0.9.3）：曾有一条 appdata\local\microsoft\windows\explorer\thumbcache，

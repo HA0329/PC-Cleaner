@@ -365,6 +365,17 @@ def _rescan(m: _Manifest):
     return results, _apply_filters([t for r in results for t in r.targets], dict(m.filters))
 
 
+def _acknowledge_danger_is_true(value: Any) -> bool:
+    """严格解析 ``acknowledge_danger``：只有布尔 ``True`` 或字符串 ``"true"`` 算确认。
+
+    不能直接用 ``bool(value)``：MCP 客户端如果传字符串 ``"false"``，
+    ``bool("false")`` 为 True，会绕过危险清单的确认闸门。
+    """
+    if value is True:
+        return True
+    return isinstance(value, str) and value.strip().lower() == "true"
+
+
 def _tool_delete(args: dict[str, Any], allow_delete: bool) -> dict[str, Any]:
     if not allow_delete:
         raise _ToolError(
@@ -380,7 +391,7 @@ def _tool_delete(args: dict[str, Any], allow_delete: bool) -> dict[str, Any]:
     if time.time() > manifest.expires:
         _MANIFESTS.pop(token, None)
         raise _ToolError("confirm_token 已过期（默认 10 分钟）；请重新 preview_delete")
-    if manifest.dangerous and not bool(args.get("acknowledge_danger")):
+    if manifest.dangerous and not _acknowledge_danger_is_true(args.get("acknowledge_danger")):
         raise _ToolError(
             "该清单包含危险操作，需 acknowledge_danger=true 才会执行："
             + "；".join(manifest.dangerous)

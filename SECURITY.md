@@ -49,6 +49,7 @@ PC-Cleaner 是一个**会删除文件**的工具，安全边界是核心设计�
 
 | 版本 | 问题 |
 | --- | --- |
+| 0.9.17 | 网络共享 `.lnk` 误判死链；`rmtree`/`rglob` 可能进入 junction；MCP `acknowledge_danger="false"` 被当作授权；提权 cmd 元字符未转义；`Windows\Installer` 未进保护名单 |
 | 0.9.9 | MCP `delete` 不写 history/audit；菜单刷新参数错位导致 `find_dirs` 只遍历 1 层；离线盘/命名空间快捷方式误判 |
 | 0.9.4 | `--json --clean ""` 静默退化为只扫描；MCP `delete` 重扫未带过滤条件导致漂移误报 |
 | 0.9.3 | `--json --yes` 绕过二次确认；CLEAR 目标为 junction 时越界清空；`npm-cache` 父规则误删运行中的 npx |

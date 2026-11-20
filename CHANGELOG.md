@@ -1,7 +1,39 @@
 # Changelog
 
-> 本文件维护最近 5 个版本（0.9.12–0.9.16）。更早的 0.2.0–0.9.11 见
+> 本文件维护最近 6 个版本（0.9.12–0.9.17）。更早的 0.2.0–0.9.11 见
 > [docs/changelog-archive.md](docs/changelog-archive.md)。
+
+## 0.9.17 (2026-11)
+
+> 主题：**安全修复**（外部代码审查确认的 P0/P1）。
+
+### 快捷方式
+
+- 解析 `CommonNetworkRelativeLink`（NetName + CommonPathSuffix），不再把
+  LinkInfo 的 Unicode 偏移字段当作路径；网络共享快捷方式一律 `UNKNOWN`，
+  不参与失效判定，避免把有效的共享快捷方式当死链删除。
+
+### 删除引擎
+
+- 用自带的安全遍历替换 `shutil.rmtree`：遇到符号链接 / junction 立即中止，
+  不递归、不删除链接本身；`--shred` 的预覆写也显式跳过重解析点，
+  防止覆写链接指向的数据。
+
+### MCP 与提权
+
+- `acknowledge_danger` 改为严格布尔判定：字符串 `"false"` 不再被当作授权。
+- 提权命令行对 `&|<>^()` 等 cmd 元字符强制加引号，路径中的 `&` 不再被
+  解释为命令分隔符。
+
+### 保护名单
+
+- 显式加入 `Windows\Installer` 与 `Windows\System32\DriverStore`，
+  与 SECURITY.md 的系统组件承诺一致。
+
+### 验证
+
+- 新增 `tests/test_v0917_security.py`（8 条）；测试总数 410；
+- Linux 上 ruff / mypy 全绿；Windows CI 待本次推送验证。
 
 ## 0.9.16 (2026-11)
 

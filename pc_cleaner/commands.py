@@ -549,12 +549,16 @@ def _quote_arg(arg: str) -> str:
     v0.9.10：此前是裸的 ``" ".join(argv)``，带空格的参数（例如
     ``--export-config "C:\\My Dir\\cfg.json"``）在提权后会被拆成两个参数，
     新进程直接 argparse 报错。规则与 ``subprocess.list2cmdline`` 一致：
-    含空格/制表符/引号的参数用双引号包裹，内部的引号与反斜杠按 Windows
-    命令行解析规则转义；``.bat`` 目标另有额外转义。
+    含空格/制表符/引号/cmd 元字符（``&|<>^()``）的参数用双引号包裹，内部的
+    引号与反斜杠按 Windows 命令行解析规则转义；``.bat`` 目标另有额外转义。
     """
     if not arg:
         return '""'
-    if not any(ch in arg for ch in ' \t\n\v"'):
+    # cmd.exe 的元字符（& 分隔命令、| 管道、<> 重定向、^ 转义、() 分组）：
+    # 即使参数里没有空格，也必须用双引号包住，否则 `C:\a&b\cfg.json` 会被
+    # 当作两条命令执行。SECURITY：提权命令行不能把用户路径拼成 cmd 语句。
+    cmd_meta = '&|<>^()'
+    if not any(ch in arg for ch in ' \t\n\v"' + cmd_meta):
         return arg
     out: list[str] = ['"']
     backslashes = 0

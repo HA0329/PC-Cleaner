@@ -283,51 +283,128 @@ def parse_shortcut(path: str | os.PathLike[str]) -> ShortcutInfo:
     return info
 
 
+def _parse_network_relative_link(
+    data: bytes, pos: int, limit: int, *, unicode_strings: bool
+) -> str:
+    """解析 ``CommonNetworkRelativeLink``，返回 NetName（只读）。
+
+    结构（MS-SHLLINK 2.3.2）：size / flags / NetNameOffset / DeviceNameOffset /
+    NetworkProviderType，以及可选的 NetNameOffsetUnicode / DeviceNameOffsetUnicode。
+    优先读 Unicode；缺失时回退 ANSI。不能把 ``NetNameOffsetUnicode`` 字段本身
+    当成字符串。
+    """
+    if pos < 0 or pos + 0x14 > limit:
+        return ""
+    size = struct.unpack_from("<I", data, pos)[0]
+    if size < 0x14:
+        return ""
+    end = min(pos + size, limit)
+    net_off = struct.unpack_from("<I", data, pos + 8)[0]
+
+    # 可选 Unicode 偏移字段（仅在结构足够大时存在）。
+    net_off_u = 0
+    if size >= 0x1C and pos + 0x1C <= end:
+        net_off_u = struct.unpack_from("<I", data, pos + 0x14)[0]
+
+    # Unicode 优先：真实网络快捷方式的 NetName 通常是 Unicode。
+    if net_off_u and 0x1C <= net_off_u < size and pos + net_off_u < end:
+        name = _read_utf16z(data[pos + net_off_u : end])
+        if name:
+            return name
+
+    if net_off and 0x14 <= net_off < size and pos + net_off < end:
+        chunk = data[pos + net_off : end]
+        ansi = _read_cstr(chunk)
+        if ansi.startswith("\\\\") or ansi.startswith("//"):
+            return ansi
+        if unicode_strings:
+            name = _read_utf16z(chunk)
+            if name:
+                return name
+        return ansi
+    return ""
+
+
+def _join_network_path(net_name: str, suffix: str) -> str:
+    """把共享根与 CommonPathSuffix 拼成完整 UNC 路径。"""
+    if not suffix:
+        return net_name
+    if net_name.endswith("\\") and suffix.startswith("\\"):
+        return net_name + suffix[1:]
+    if net_name.endswith("\\") or suffix.startswith("\\"):
+        return net_name + suffix
+    return net_name + "\\" + suffix
+
+
 def _parse_link_info(data: bytes, off: int, info: ShortcutInfo) -> int:
     """解析 ``LinkInfo`` 结构体，把候选目标写入 ``info``，返回下一个字段的偏移。
 
-    失败时**静默跳过**（返回原偏移 + 结构体长度），让上层继续尝试 StringData。
+    失败时**静默跳过**（返回结构体末尾），让上层继续尝试 StringData。
+    v0.9.17：按 MS-SHLLINK 解析 ``CommonNetworkRelativeLink``；此前把
+    LinkInfo 的 Unicode 偏移字段（0x1C）当作路径字符串，网络共享快捷方式会被
+    解析成 ``+`` 之类的伪路径，进而被误判为死链。
     """
     start = off
     if start + 4 > len(data):
         info.error = "LinkInfo 越界"
         return len(data)
     link_info_size = struct.unpack_from("<I", data, start)[0]
-    nxt = start + max(link_info_size, 4)
     if link_info_size < 0x1C or start + 0x1C > len(data):
         info.error = "LinkInfo 结构过小"
-        return min(nxt, len(data))
+        return min(start + max(link_info_size, 4), len(data))
+    limit = min(start + link_info_size, len(data))
+    if start + 8 > limit:
+        info.error = "LinkInfo 头越界"
+        return limit
 
+    header_size = struct.unpack_from("<I", data, start + 4)[0]
+    if header_size < 0x1C or header_size > link_info_size:
+        info.error = "LinkInfo 头部尺寸非法"
+        return limit
     li_flags = struct.unpack_from("<I", data, start + 8)[0]
-    has_volume_id_and_local_base = bool(li_flags & 0x00000001)
-    # 本地基路径仅在同时给出 VolumeID 时有效（否则该字段位置是 CommonPathSuffix）
-    if not has_volume_id_and_local_base:
-        common = _read_cstr(data[start + 0x1C : min(nxt, len(data))])
-        if common:
-            info.targets.append(_expand_one(common))
-        return min(nxt, len(data))
+    unicode_strings = header_size >= 0x24
 
-    if start + 0x24 > len(data):
-        return min(nxt, len(data))
-    local_base_off = struct.unpack_from("<I", data, start + 0x10)[0]
-    common_suffix_off = struct.unpack_from("<I", data, start + 0x18)[0]
-    # 两个偏移都相对 LinkInfo 起点
-    limit = min(nxt, len(data))
-    if local_base_off:
-        pos = start + local_base_off
-        if start <= pos < limit:
-            base = _read_cstr(data[pos:limit])
-            if base:
-                suffix = ""
-                if common_suffix_off:
-                    spos = start + common_suffix_off
-                    if start <= spos < limit:
-                        suffix = _read_cstr(data[spos:limit])
-                info.targets.append(_expand_one(base + suffix))
-    if li_flags & 0x00000002:  # VolumeIDAndLocalBasePath 之外还有 NetName（网络共享）
+    # CommonPathSuffix：本地路径 / 网络共享路径共用的后缀。
+    suffix = ""
+    suffix_off = struct.unpack_from("<I", data, start + 0x18)[0]
+    if suffix_off and start + suffix_off < limit:
+        suffix = _read_cstr(data[start + suffix_off : limit])
+    if unicode_strings and start + 0x24 <= limit:
+        suffix_off_u = struct.unpack_from("<I", data, start + 0x20)[0]
+        if suffix_off_u and start + suffix_off_u < limit:
+            unicode_suffix = _read_utf16z(data[start + suffix_off_u : limit])
+            if unicode_suffix:
+                suffix = unicode_suffix
+
+    # 本地路径：ANSI/Unicode 偏移优先，二者都没有时再考虑网络共享。
+    local_base = ""
+    if li_flags & 0x00000001:
+        local_base_off = struct.unpack_from("<I", data, start + 0x10)[0]
+        if local_base_off and start + local_base_off < limit:
+            local_base = _read_cstr(data[start + local_base_off : limit])
+        if not local_base and unicode_strings and start + 0x24 <= limit:
+            local_base_off_u = struct.unpack_from("<I", data, start + 0x1C)[0]
+            if local_base_off_u and start + local_base_off_u < limit:
+                local_base = _read_utf16z(data[start + local_base_off_u : limit])
+        if local_base:
+            info.targets.append(_expand_one(local_base + suffix))
+
+    # 网络共享：NetName + CommonPathSuffix；即使解析失败也标记 network，
+    # classify() 对网络位置一律返回 UNKNOWN，绝不判死链。
+    if li_flags & 0x00000002:
         info.network = True
-    # VolumeID 里的盘符信息不参与判定：LocalBasePath 已含完整路径
-    return min(nxt, len(data))
+        cnrl_off = struct.unpack_from("<I", data, start + 0x14)[0]
+        net_name = ""
+        if cnrl_off and start + cnrl_off < limit:
+            net_name = _parse_network_relative_link(
+                data, start + cnrl_off, limit, unicode_strings=unicode_strings
+            )
+        if net_name:
+            info.targets.append(_expand_one(_join_network_path(net_name, suffix)))
+        else:
+            info.error = "网络共享路径解析失败"
+
+    return limit
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +565,12 @@ def classify(info: ShortcutInfo) -> tuple[str, str]:
     4. 目标卷不可用（离线盘 / 断开的共享）→ ``UNAVAILABLE``；
     5. 其余 → ``BROKEN``（目标卷在，目标确实没了）。
     """
+    # 网络位置（UNC / CommonNetworkRelativeLink）：无论是否能取到完整路径，
+    # 都不做存在性判定，更不判死链——断开的共享与离线盘一样可能只是暂时不可用。
+    if info.network:
+        target = info.target or "（未解析出共享路径）"
+        return V_UNKNOWN, f"目标是网络位置，未做存在性判定: {target}"
+
     usable = [t for t in info.targets if not t.lower().startswith(_NON_FILE_PREFIXES)]
 
     # URL 型快捷方式：地址在 IDList 的 URL 段里，永远不是"死链"

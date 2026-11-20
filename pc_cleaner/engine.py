@@ -194,28 +194,84 @@ def _shred_file(path: Path, passes: int = 1) -> None:
 # ===========================================================================
 # 删除单个文件/目录（TOCTOU 防护）
 # ===========================================================================
-def _rmtree(path: Path) -> None:
-    """删除整棵目录，Windows 只读属性导致失败时先清属性再重试（v0.9.3）。
-
-    ``shutil.rmtree(ignore_errors=False)`` 在遇到只读文件时直接抛
-    ``PermissionError``；临时目录/缓存里只读文件很常见，先 ``chmod`` 再删。
-    Python 3.12 起 ``onerror`` 被 ``onexc`` 取代，这里按版本选择。
-    """
-
-    def _retry(func, target, exc):  # noqa: ANN001
+def _unlink_file(path: Path) -> None:
+    """删除单个文件；Windows 只读属性导致失败时先清属性再重试。"""
+    try:
+        os.unlink(str(path))
+    except PermissionError:
         try:
-            os.chmod(target, 0o700)
-        except OSError:
-            raise exc from None
-        try:
-            func(target)
+            os.chmod(str(path), 0o700)
         except OSError:
             raise
+        os.unlink(str(path))
 
-    if sys.version_info >= (3, 12):
-        shutil.rmtree(str(path), ignore_errors=False, onexc=_retry)
-    else:  # pragma: no cover - Python 3.10/3.11
-        shutil.rmtree(str(path), ignore_errors=False, onerror=_retry)
+
+def _iter_files_no_links(root: Path) -> list[Path]:
+    """列出目录内的普通文件，**不跟随也不进入任何重解析点**。
+
+    用于 ``--shred`` 预覆写：``Path.rglob`` 在 Windows 上可能把 junction 当作
+    普通目录递归进去，导致覆写链接目标；这里显式剪枝。
+    """
+    from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
+
+    files: list[Path] = []
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return files
+    for child in children:
+        try:
+            if is_reparse_point(child):
+                continue
+            if child.is_dir():
+                files.extend(_iter_files_no_links(child))
+            elif child.is_file():
+                files.append(child)
+        except OSError:
+            continue
+    return files
+
+
+def _rmtree(path: Path) -> None:
+    """删除整棵目录，但**绝不跟随/删除符号链接与 junction**。
+
+    v0.9.17：不再调用 ``shutil.rmtree``。Python 3.12 在 Windows 上会把 junction
+    当成普通目录递归，目标目录内只要有一个链接，就可能越界删除链接指向的数据；
+    这与 SECURITY.md「符号链接 / junction 一律不删、不清空」冲突。这里手工遍历：
+    遇到重解析点立即中止当前目录的删除（链接本身及其目标都保留）。
+    """
+    from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
+
+    if is_reparse_point(path):
+        raise PermissionError(f"拒绝删除符号链接/junction: {path}")
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        raise
+
+    # 先检查直接子项：只要发现链接，整个目录不删（避免删掉链接旁边的数据后
+    # 又因为 rmdir 失败而留下一个半清空目录）。
+    if any(is_reparse_point(child) for child in children):
+        raise PermissionError(
+            f"目录包含符号链接/junction，拒绝递归删除: {path}"
+        )
+
+    for child in children:
+        try:
+            if child.is_dir():
+                _rmtree(child)
+            else:
+                _unlink_file(child)
+        except FileNotFoundError:
+            continue
+    try:
+        os.rmdir(str(path))
+    except PermissionError:
+        try:
+            os.chmod(str(path), 0o700)
+        except OSError:
+            raise
+        os.rmdir(str(path))
 
 
 def _delete_path(
@@ -272,11 +328,10 @@ def _delete_path(
     # 永久删除
     if is_dir:
         if shred:
-            # 先覆写目录内所有文件（递归）
-            for child in real.rglob("*"):
+            # 先覆写目录内所有文件（递归，显式跳过 junction / 符号链接）
+            for child in _iter_files_no_links(real):
                 try:
-                    if child.is_file() and not is_reparse_point(child):
-                        _shred_file(child, passes=shred_passes)
+                    _shred_file(child, passes=shred_passes)
                 except OSError:
                     continue
         _rmtree(real)
@@ -615,18 +670,12 @@ def _path_size_now(path: Path) -> int:
 
 def _dir_size_now(path: Path) -> int:
     """快速计算目录当前大小（用于 CLEAR 模式的前后对比）。不跟随重解析点。"""
-    from .scanner import is_reparse_point  # 延迟导入，避免循环依赖
-
     total = 0
-    try:
-        for child in path.rglob("*"):
-            try:
-                if child.is_file() and not is_reparse_point(child):
-                    total += child.stat().st_size
-            except OSError:
-                continue
-    except OSError:
-        pass
+    for child in _iter_files_no_links(path):
+        try:
+            total += child.stat().st_size
+        except OSError:
+            continue
     return total
 
 

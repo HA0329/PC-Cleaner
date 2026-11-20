@@ -57,6 +57,13 @@ jobs:
       - name: Install project with dev extras
         run: pip install -e ".[dev]"
 
+      # 工程质量闸门：lint 与类型检查在 Windows 上跑，避免只在开发者机器上通过。
+      - name: Lint (ruff)
+        run: python -m ruff check pc_cleaner tests
+
+      - name: Type-check (mypy)
+        run: python -m mypy
+
       - name: Byte-compile package
         run: python -m compileall -q pc_cleaner
 
@@ -82,7 +89,7 @@ jobs:
             python -VV || true
             python -c "import sys,tempfile,platform;print('sys.platform:',sys.platform);print('tempdir:',tempfile.gettempdir());print('platform:',platform.platform())" || true
             python -m pip --version || true
-            python -m pip list 2>/dev/null | grep -iE "send2trash|pytest|pip|setuptools" || true
+            python -m pip list 2>/dev/null | grep -iE "send2trash|pytest|ruff|mypy|pip|setuptools" || true
             echo "::endgroup::"
           fi
           exit "$status"
